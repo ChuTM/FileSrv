@@ -1,5 +1,5 @@
 //! Idempotency-Key cache for POST /v1/upload (spec §4: "Idempotency-Key
-//! （建议）重试不重複建檔").
+//! (recommended) retry must not create a duplicate file").
 //!
 //! Keyed by (app_id, key): a retried upload inside the configured window gets
 //! back the ORIGINAL file metadata (no second blob written, no quota double

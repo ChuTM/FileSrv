@@ -1,6 +1,10 @@
 //! Admin console static assets (`index.html` / `app.js` / `style.css`), embedded
 //! at compile time with `include_str!` and served ONLY on the loopback admin
-//! bind (`ADMIN_BIND`). The public router must never reference this module.
+//! bind (`ADMIN_BIND`). The public router must never reference this module —
+//! with ONE deliberate exception: `security.txt` (RFC 9116). It is a public
+//! disclosure file with no secrets and, by spec, must be reachable from the
+//! public origin, so `public_router` serves `/.well-known/security.txt` from
+//! here. Everything else in this module stays loopback-only.
 //!
 //! Security posture:
 //! - The handlers serve pure static bytes — no secrets, no per-request data.
@@ -16,6 +20,7 @@ use axum::http::{HeaderMap, HeaderValue};
 const INDEX_HTML: &str = include_str!("admin_ui/static/index.html");
 const APP_JS: &str = include_str!("admin_ui/static/app.js");
 const STYLE_CSS: &str = include_str!("admin_ui/static/style.css");
+const SECURITY_TXT: &str = include_str!("admin_ui/static/.well-known/security.txt");
 
 const CSP: &str = concat!(
     "default-src 'self'; ",
@@ -48,4 +53,10 @@ pub async fn app_js() -> (HeaderMap, &'static str) {
 
 pub async fn style_css() -> (HeaderMap, &'static str) {
     (security_headers("text/css; charset=utf-8"), STYLE_CSS)
+}
+
+/// RFC 9116 security.txt — the only asset referenced by the public router.
+/// Pure static text, no secrets, served with the same hardening headers.
+pub async fn security_txt() -> (HeaderMap, &'static str) {
+    (security_headers("text/plain; charset=utf-8"), SECURITY_TXT)
 }

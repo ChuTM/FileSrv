@@ -223,6 +223,42 @@ pub fn cleanup_stale_tmp(cfg: &Config) -> usize {
     removed
 }
 
+/// Remove decrypted-cache files under `blob_root/dec_cache` whose mtime is
+/// older than `cutoff` (unix seconds). The cache is a re-creatable plaintext
+/// materialization of an envelope-encrypted blob, so it must NOT persist on
+/// disk indefinitely (F2 fix); the maintenance loop sweeps it on a TTL.
+/// Only files are removed; the directory itself is left in place.
+pub fn sweep_dec_cache(cfg: &Config, cutoff: i64) -> usize {
+    let cache_dir = cfg.blob_root.join("dec_cache");
+    let rd = match std::fs::read_dir(&cache_dir) {
+        Ok(rd) => rd,
+        Err(_) => return 0, // no cache dir (yet) is fine
+    };
+    let mut removed = 0;
+    for e in rd.flatten() {
+        let is_file = e.file_type().map(|t| t.is_file()).unwrap_or(false);
+        if !is_file {
+            continue;
+        }
+        let meta = match e.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let secs = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs() as i64,
+            Err(_) => continue,
+        };
+        if secs < cutoff && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +280,7 @@ mod tests {
             encrypt_blobs: true,
             soft_delete_grace_secs: 7 * 86400,
             purge_interval_secs: 600,
+            allow_non_loopback_admin: false,
         }
     }
 
@@ -343,6 +380,34 @@ mod tests {
         assert_eq!(p.canonicalize().unwrap(), raw.canonicalize().unwrap());
         assert_eq!(std::fs::read(&p).unwrap(), b"legacy-plaintext");
         assert!(!cfg.blob_root.join("dec_cache").exists());
+    }
+
+    #[test]
+    fn sweep_dec_cache_removes_only_stale_files() {
+        let dir = TempDir::new().unwrap();
+        let cfg = cfg_with(&dir);
+        let cache_dir = cfg.blob_root.join("dec_cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let fresh = cache_dir.join("fresh");
+        let stale = cache_dir.join("stale");
+        std::fs::write(&fresh, b"plaintext-fresh").unwrap();
+        std::fs::write(&stale, b"plaintext-stale").unwrap();
+
+        let now = std::time::SystemTime::now();
+        let stale_secs = (now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64) - 10 * 86400;
+        // backdate the stale file's mtime (std::fs::File::set_times, Rust 1.75+)
+        let f = std::fs::File::open(&stale).unwrap();
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(stale_secs as u64);
+        f.set_times(std::fs::FileTimes::new().set_modified(mtime)).unwrap();
+        drop(f);
+
+        // cutoff = now - 1 day: only the backdated file is swept
+        let cutoff = crate::config::Config::now() - 86400;
+        assert_eq!(sweep_dec_cache(&cfg, cutoff), 1);
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        // second run: nothing left to sweep
+        assert_eq!(sweep_dec_cache(&cfg, cutoff), 0);
     }
 
     #[test]

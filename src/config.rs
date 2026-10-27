@@ -36,6 +36,11 @@ pub struct Config {
     /// Period of the background maintenance loop (nonce/audit pruning + tombstone
     /// purge). Short for tests/E2E; 600s in production.
     pub purge_interval_secs: u64,
+    /// Refuse to start when the admin bind is not loopback. The admin surface
+    /// (API + console) is designed for localhost only; this is a safe default
+    /// that prevents accidental exposure via misconfiguration (F6 fix).
+    /// Set TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN=true to override at your own risk.
+    pub allow_non_loopback_admin: bool,
 }
 
 /// Operational knobs that were added with the API layer (backup, chunked
@@ -70,6 +75,11 @@ pub struct Ops {
     /// Export artifacts (tar/zip) and their rows are swept this many seconds
     /// after the job finished.
     pub export_ttl_secs: i64,
+    /// Plaintext decrypt-cache entries (blob_root/dec_cache) older than this
+    /// are swept by the maintenance loop. The cache is a re-creatable
+    /// materialization of an encrypted blob, so it must not persist plaintext
+    /// on disk indefinitely (F2 fix).
+    pub dec_cache_ttl_secs: i64,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -114,6 +124,10 @@ impl Config {
                 .parse::<u64>()
                 .unwrap_or(600)
                 .clamp(1, 86400),
+            allow_non_loopback_admin: matches!(
+                env_or("TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN", "false").as_str(),
+                "true" | "1" | "yes" | "on"
+            ),
         }
     }
 
@@ -155,6 +169,10 @@ impl Ops {
                 .parse::<i64>()
                 .unwrap_or(86400)
                 .max(1),
+            dec_cache_ttl_secs: env_or("TENANT_FS_DEC_CACHE_TTL_SECS", "86400")
+                .parse::<i64>()
+                .unwrap_or(86400)
+                .max(60),
         }
     }
 }

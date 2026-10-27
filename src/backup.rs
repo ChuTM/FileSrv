@@ -13,7 +13,7 @@
 
 use crate::config::{Config, Ops};
 use crate::crypto;
-use crate::db;
+use crate::db::{self, Db};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -94,17 +94,28 @@ pub struct BackupOutput {
 }
 
 /// Run one backup: DB snapshot + blobs tar + manifest, recorded in `backups`.
-/// Caller holds the DB connection.
-pub fn run_backup(cfg: &Config, ops: &Ops, conn: &Connection) -> Result<BackupOutput, String> {
-    let settings = effective_settings(conn, ops);
+///
+/// The backup routine manages its OWN short DB locks and performs the slow
+/// blob-tree archiving WITHOUT holding the global DB mutex (F3 fix): requests
+/// are only blocked for the brief VACUUM INTO snapshot and the bookkeeping
+/// updates, never for the whole tar walk.
+pub fn run_backup(cfg: &Config, ops: &Ops, db: &Db) -> Result<BackupOutput, String> {
+    let settings = {
+        let conn = db.lock().unwrap();
+        effective_settings(&conn, ops)
+    };
     let backup_id = format!("bk_{}", crypto::random_token());
     let now = Config::now();
-    let row_id = db::insert_backup(conn, &backup_id, now).map_err(|e| e.to_string())?;
+    let row_id = {
+        let conn = db.lock().unwrap();
+        db::insert_backup(&conn, &backup_id, now).map_err(|e| e.to_string())?
+    };
 
-    match run_backup_inner(cfg, ops, conn, &settings, row_id, &backup_id, now) {
+    match run_backup_inner(cfg, ops, db, &settings, row_id, &backup_id, now) {
         Ok(out) => Ok(out),
         Err(e) => {
-            db::finish_backup(conn, row_id, "failed", None, None, None, Some(&e), now)
+            let conn = db.lock().unwrap();
+            db::finish_backup(&conn, row_id, "failed", None, None, None, Some(&e), now)
                 .map_err(|fe| format!("{e} (and failed to record: {fe})"))?;
             Err(e)
         }
@@ -114,7 +125,7 @@ pub fn run_backup(cfg: &Config, ops: &Ops, conn: &Connection) -> Result<BackupOu
 fn run_backup_inner(
     cfg: &Config,
     ops: &Ops,
-    conn: &Connection,
+    db: &Db,
     settings: &EffectiveSettings,
     row_id: i64,
     backup_id: &str,
@@ -122,18 +133,23 @@ fn run_backup_inner(
 ) -> Result<BackupOutput, String> {
     let dir = resolve_backup_dir(ops, &settings.target, backup_id)?;
 
-    // 1) Consistent DB snapshot. VACUUM INTO takes a literal path (no bound
-    //    params); the path comes from our own canonicalized root, and any
-    //    single quote is escaped per SQLite string-literal rules.
+    // 1) Consistent DB snapshot, taken under a SHORT lock. VACUUM INTO takes a
+    //    literal path (no bound params); the path comes from our own
+    //    canonicalized root, and any single quote is escaped per SQLite
+    //    string-literal rules.
     let db_snapshot = dir.join("db.sqlite");
     let sql = format!(
         "VACUUM INTO '{}'",
         db_snapshot.to_string_lossy().replace('\'', "''")
     );
-    conn.execute(&sql, []).map_err(|e| format!("db snapshot: {e}"))?;
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(&sql, []).map_err(|e| format!("db snapshot: {e}"))?;
+    }
 
     // 2) Blobs archive: the encrypted blob tree, skipping plaintext caches,
     //    finished export artifacts, and interrupted-upload partials.
+    //    Runs WITHOUT the DB lock (this is the slow part).
     let blobs_tar = dir.join("blobs.tar");
     let _archived = tar_blobs(cfg, &blobs_tar)?;
 
@@ -162,20 +178,23 @@ fn run_backup_inner(
         .unwrap_or(0)
         + std::fs::metadata(&blobs_tar).map(|m| m.len() as i64).unwrap_or(0);
 
-    db::finish_backup(
-        conn,
-        row_id,
-        "ready",
-        Some(total_size),
-        Some(&dir.to_string_lossy()),
-        Some(&manifest.to_string()),
-        None,
-        now,
-    )
-    .map_err(|e| e.to_string())?;
-
-    // 4) Retention: keep the newest N copies, delete the rest (dirs + rows).
-    enforce_retention(conn, settings.retention).ok();
+    // 4) Record "ready" + retention under a short lock.
+    {
+        let conn = db.lock().unwrap();
+        db::finish_backup(
+            &conn,
+            row_id,
+            "ready",
+            Some(total_size),
+            Some(&dir.to_string_lossy()),
+            Some(&manifest.to_string()),
+            None,
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+        // Retention: keep the newest N copies, delete the rest (dirs + rows).
+        enforce_retention(&conn, settings.retention).ok();
+    }
 
     Ok(BackupOutput {
         id: row_id,
@@ -256,6 +275,7 @@ fn walk_tar(
 mod tests {
     use super::*;
     use crate::db::{migrate, open_db};
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     fn setup(dir: &TempDir) -> (Config, Ops) {
@@ -274,6 +294,7 @@ mod tests {
             encrypt_blobs: true,
             soft_delete_grace_secs: 7 * 86400,
             purge_interval_secs: 600,
+            allow_non_loopback_admin: false,
         };
         let ops = Ops {
             backup_root: dir.path().join("backups"),
@@ -285,6 +306,7 @@ mod tests {
             idem_window_secs: 3600,
             idem_max_entries: 10000,
             export_ttl_secs: 86400,
+            dec_cache_ttl_secs: 86400,
         };
         (cfg, ops)
     }
@@ -311,7 +333,8 @@ mod tests {
 
         let conn = open_db(&cfg.db_path).unwrap();
         migrate(&conn).unwrap();
-        let out = run_backup(&cfg, &ops, &conn).unwrap();
+        let db: Db = Arc::new(Mutex::new(conn));
+        let out = run_backup(&cfg, &ops, &db).unwrap();
         assert!(out.size > 0);
         assert_eq!(out.files.len(), 2);
 
@@ -337,9 +360,13 @@ mod tests {
         assert!(!tar_bytes.windows(12).any(|w| w == b"payload-123"), "plaintext must not leak into archive");
 
         // retention works: run two more with keep=2, oldest row/dir gone
-        db::set_setting(&conn, "retention", "2").unwrap();
-        run_backup(&cfg, &ops, &conn).unwrap();
-        run_backup(&cfg, &ops, &conn).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            db::set_setting(&conn, "retention", "2").unwrap();
+        }
+        run_backup(&cfg, &ops, &db).unwrap();
+        run_backup(&cfg, &ops, &db).unwrap();
+        let conn = db.lock().unwrap();
         let rows = db::list_backups(&conn).unwrap();
         assert_eq!(rows.len(), 2, "retention=2 kept newest");
     }

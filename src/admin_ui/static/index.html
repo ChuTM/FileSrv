@@ -1,86 +1,86 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>檔案儲存服務 · 管理控制台</title>
+<title>File Storage Service · Admin Console</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<!-- 登入視圖：未持有管理員權杖時顯示 -->
+<!-- Login view: shown when no admin token is held -->
 <div id="view-login" class="login-wrap" hidden>
   <form id="login-form" class="login-card" autocomplete="off">
     <div class="brand-mark" aria-hidden="true"></div>
-    <h1>檔案儲存服務</h1>
-    <p class="login-sub">管理控制台 · 僅限本機迴路（loopback）存取</p>
+    <h1>File Storage Service</h1>
+    <p class="login-sub">Admin Console · loopback access only</p>
     <label class="field">
-      <span class="field-label">管理員權杖（Admin Token）</span>
+      <span class="field-label">Admin Token</span>
       <input id="login-token" type="password" required spellcheck="false"
-             autocapitalize="off" autocomplete="off" placeholder="貼上 TENANT_FS_ADMIN_TOKEN">
+             autocapitalize="off" autocomplete="off" placeholder="Paste TENANT_FS_ADMIN_TOKEN">
     </label>
     <p id="login-error" class="form-error" role="alert" hidden></p>
-    <button type="submit" class="btn btn-primary btn-block">登入</button>
-    <p class="login-note">權杖僅存於本頁工作階段（sessionStorage），重新整理後保留、關閉分頁即清除，不會寫入 URL 或本機磁碟。</p>
+    <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+    <p class="login-note">The token lives only in this page's session (sessionStorage); it survives a refresh and is cleared when the tab closes. It is never written to the URL or to disk.</p>
   </form>
 </div>
 
-<!-- 主應用外殼：登入成功後顯示 -->
+<!-- Main app shell: shown after login succeeds -->
 <div id="app-shell" class="shell" hidden>
   <aside class="sidebar">
     <div class="side-brand">
       <div class="brand-mark sm" aria-hidden="true"></div>
-      <span>檔案儲存服務</span>
+      <span>File Storage Service</span>
     </div>
     <nav class="side-nav" id="side-nav">
-      <button class="nav-item" data-view="apps"><span class="nav-ico" aria-hidden="true">▣</span>應用程式</button>
-      <button class="nav-item" data-view="audit"><span class="nav-ico" aria-hidden="true">☰</span>稽核記錄</button>
-      <button class="nav-item" data-view="backup"><span class="nav-ico" aria-hidden="true">◷</span>備份</button>
+      <button class="nav-item" data-view="apps"><span class="nav-ico" aria-hidden="true">▣</span>Apps</button>
+      <button class="nav-item" data-view="audit"><span class="nav-ico" aria-hidden="true">☰</span>Audit Log</button>
+      <button class="nav-item" data-view="backup"><span class="nav-ico" aria-hidden="true">◷</span>Backup</button>
     </nav>
     <div class="side-foot">
-      <button id="btn-logout" class="btn btn-ghost btn-block">登出</button>
+      <button id="btn-logout" class="btn btn-ghost btn-block">Sign out</button>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar">
-      <h2 id="view-title">應用程式</h2>
+      <h2 id="view-title">Apps</h2>
       <div id="topbar-actions" class="topbar-actions"></div>
     </header>
     <p id="global-error" class="banner banner-error" role="alert" hidden></p>
 
-    <!-- 應用程式視圖 -->
+    <!-- Apps view -->
     <section id="view-apps" class="view">
       <div class="table-card">
         <div id="apps-table-wrap" class="table-wrap"></div>
       </div>
     </section>
 
-    <!-- 稽核記錄視圖 -->
+    <!-- Audit view -->
     <section id="view-audit" class="view" hidden>
       <div class="filter-bar">
         <label class="field inline">
-          <span class="field-label">應用程式 ID</span>
-          <input id="audit-app-id" type="number" min="1" placeholder="全部" spellcheck="false">
+          <span class="field-label">App ID</span>
+          <input id="audit-app-id" type="number" min="1" placeholder="All" spellcheck="false">
         </label>
         <label class="field inline">
-          <span class="field-label">時間範圍</span>
+          <span class="field-label">Time range</span>
           <select id="audit-since">
-            <option value="0">全部</option>
-            <option value="86400">最近 24 小時</option>
-            <option value="604800">最近 7 天</option>
-            <option value="2592000">最近 30 天</option>
+            <option value="0">All</option>
+            <option value="86400">Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
           </select>
         </label>
-        <button id="audit-refresh" class="btn btn-ghost">重新整理</button>
+        <button id="audit-refresh" class="btn btn-ghost">Refresh</button>
       </div>
       <div class="table-card">
         <div id="audit-table-wrap" class="table-wrap"></div>
       </div>
     </section>
 
-    <!-- 備份視圖（端點未實作時優雅降級） -->
+    <!-- Backup view (degrades gracefully when the endpoint is not implemented) -->
     <section id="view-backup" class="view" hidden>
       <div class="table-card">
         <div id="backup-wrap"></div>
@@ -89,7 +89,7 @@
   </main>
 </div>
 
-<!-- 模態彈層掛載點（全部內容由 app.js 以 DOM API 建構） -->
+<!-- Modal mount point (all content is built by app.js via DOM APIs) -->
 <div id="modal-root"></div>
 
 <script src="app.js" defer></script>

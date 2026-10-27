@@ -37,6 +37,7 @@ fn cfg_at(dir: &TempDir) -> Config {
         encrypt_blobs: true,
         soft_delete_grace_secs: 7 * 86400,
         purge_interval_secs: 600,
+        allow_non_loopback_admin: false,
     }
 }
 
@@ -490,7 +491,8 @@ async fn user_acl_and_folder_inheritance_deny_wins() {
 #[tokio::test]
 async fn inherited_folder_deny_beats_file_explicit_acl() {
     // Regression for test report §5.1 (HIGH): a file-level explicit allow must
-    // NOT override a deny inherited from the folder chain ("档案盖不掉继承的 deny").
+    // NOT override a deny inherited from the folder chain ("a file-level allow
+    // cannot override an inherited deny").
     let ctx = new_test_ctx();
     let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
     let (s, _) = upload_bytes(&ctx, &key, &secret, "u2", b"x", "").await;
@@ -1157,6 +1159,7 @@ fn test_ops(dir: &TempDir) -> Ops {
         idem_window_secs: 3600,
         idem_max_entries: 10000,
         export_ttl_secs: 86400,
+        dec_cache_ttl_secs: 86400,
     }
 }
 
@@ -1473,4 +1476,150 @@ async fn export_ttl_and_upload_job_prune() {
     .unwrap();
     let partials = db::prune_expired_uploads(&conn, now).unwrap();
     assert_eq!(partials, vec!["/tmp/up.part".to_string()]);
+}
+
+#[tokio::test]
+async fn admin_add_user_list_and_jwt_login() {
+    let ctx = new_test_ctx();
+    let (app_id, _key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+
+    // invalid user_ids are rejected under the same rules as uploads (F4)
+    for bad in ["../evil", "a/b", "a\\b", ".."] {
+        let (s, v) = json_of(
+            send(
+                &ctx.admin,
+                admin_req("POST", &format!("/admin/v1/apps/{app_id}/users"), json!({ "user_id": bad })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "user_id {bad:?} must be rejected: {v}");
+    }
+    // unknown app -> 404
+    let (s, _) = json_of(
+        send(&ctx.admin, admin_req("POST", "/admin/v1/apps/9999/users", json!({ "user_id": "u1" }))).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // add u1 (created), duplicate (already exists)
+    let (s, v) = json_of(
+        send(&ctx.admin, admin_req("POST", &format!("/admin/v1/apps/{app_id}/users"), json!({ "user_id": "u1" }))).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["created"], json!(true));
+    let (s, v) = json_of(
+        send(&ctx.admin, admin_req("POST", &format!("/admin/v1/apps/{app_id}/users"), json!({ "user_id": "u1" }))).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["created"], json!(false));
+
+    // list
+    let (s, v) = json_of(
+        send(&ctx.admin, admin_req("GET", &format!("/admin/v1/apps/{app_id}/users"), Value::Null)).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let users = v["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["user_id"], json!("u1"));
+
+    // an admin-provisioned user can authenticate with a JWT immediately
+    let (s, _) = send(
+        &ctx.public,
+        jwt_req(&secret, app_id, "u1", "GET", "/v1/files", Value::Null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn download_rate_limited_per_app() {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let ops = test_ops(&dir);
+    let (public, admin) = custom_routers(&cfg, ops, 3); // 3 requests/min budget per app
+    let (_, key, secret) = create_app_quota(&admin, "dl", 1 << 20, 1 << 20).await;
+
+    let (s, v) = json_of(
+        send(&public, signed_req_raw(&key, &secret, "POST", "/v1/upload", "", b"data", &[("x-user-id", "u1")])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fid = v["file_id"].as_i64().unwrap();
+    let (s, v) = json_of(
+        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({ "file_id": fid }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    // upload(1) + generate(2) + download(3) fit the budget
+    let (s, _) = send(
+        &public,
+        Request::builder().method("GET").uri(format!("/v1/download/{token}")).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // 4th request in the same window -> 429 + Retry-After (F7 fix)
+    let (s, headers, _) = send_full(
+        &public,
+        Request::builder().method("GET").uri(format!("/v1/download/{token}")).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = headers.get("retry-after").unwrap().to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&retry));
+}
+
+#[tokio::test]
+async fn folder_cycle_rejected() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "POST", "/v1/folders", "", json!({ "name": "rootA" }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let fa = v["folder_id"].as_i64().unwrap();
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "POST", "/v1/folders", "", json!({ "name": "childB" }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let fb = v["folder_id"].as_i64().unwrap();
+
+    // B under A is fine
+    let (s, _) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "PATCH", &format!("/v1/folders/{fb}"), "", json!({ "parent_id": fa }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    // A under B would create a cycle -> 400 (F5 fix)
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "PATCH", &format!("/v1/folders/{fa}"), "", json!({ "parent_id": fb }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    // A can still be moved back to the root (null parent)
+    let (s, _) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "PATCH", &format!("/v1/folders/{fa}"), "", json!({ "parent_id": null }), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn invalid_user_id_rejected_on_upload() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    for bad in ["../evil", "a/b", "a\\b", ".."] {
+        let (s, v) = upload_bytes(&ctx, &key, &secret, bad, b"x", "").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "user_id {bad:?} must be rejected: {v}");
+    }
+    // a plain user_id still works
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u_ok", b"x", "").await;
+    assert_eq!(s, StatusCode::OK);
 }

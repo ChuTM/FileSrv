@@ -268,6 +268,84 @@ pub async fn app_usage(AxState(st): AxState<AppState>, req: Request<Body>) -> Ap
     .into_response())
 }
 
+// POST /admin/v1/apps/:id/users
+// Admin-managed user directory: the operator pre-provisions users for an app
+// here (the app can also still vouch for users at upload time). The user_id is
+// validated with the same rules as the upload path so exported archive entry
+// names can never contain traversal sequences.
+pub async fn add_user(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let (ctx, body) = body_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let id: i64 = ctx
+        .path_segment(4)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| ApiError::bad_request("Invalid app id."))?;
+    let body: Value = serde_json::from_slice(&body).map_err(ApiError::from)?;
+    let user_id = body
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("user_id is required."))?;
+    crate::routes::app::validate_user_id(user_id)
+        .map_err(|_| ApiError::bad_request("Invalid user_id."))?;
+
+    let conn = st.db.lock().unwrap();
+    let app = db::app_by_id(&conn, id)?
+        .filter(|a| a.deleted_at.is_none())
+        .ok_or_else(|| ApiError::not_found("App not found."))?;
+    let created = conn.execute(
+        "INSERT OR IGNORE INTO app_users(app_id,user_id,created_at) VALUES(?1,?2,?3)",
+        params![id, user_id, Config::now()],
+    )?;
+    db::audit(
+        &conn,
+        &db::AuditEntry {
+            actor: "admin",
+            action: "app.user_add",
+            app_id: Some(id),
+            target: user_id,
+            ip: &ctx.client_ip(),
+            decision: "allow",
+        },
+        Config::now(),
+    );
+    Ok(Json(json!({
+        "app_id": id,
+        "app_name": app.name,
+        "user_id": user_id,
+        "created": created == 1
+    }))
+    .into_response())
+}
+
+// GET /admin/v1/apps/:id/users — list the admin-provisioned user directory.
+pub async fn list_users(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let ctx = query_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let id: i64 = ctx
+        .path_segment(4)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| ApiError::bad_request("Invalid app id."))?;
+    let conn = st.db.lock().unwrap();
+    let _app = db::app_by_id(&conn, id)?
+        .filter(|a| a.deleted_at.is_none())
+        .ok_or_else(|| ApiError::not_found("App not found."))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, created_at FROM app_users WHERE app_id=?1
+             ORDER BY created_at DESC, user_id ASC",
+        )
+        .map_err(ApiError::from)?;
+    let rows = stmt
+        .query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(ApiError::from)?;
+    let mut users: Vec<Value> = Vec::new();
+    for r in rows {
+        let (uid, at) = r.map_err(ApiError::from)?;
+        users.push(json!({ "user_id": uid, "created_at": at }));
+    }
+    Ok(Json(json!({ "app_id": id, "users": users })).into_response())
+}
+
 // GET /admin/v1/audit
 pub async fn list_audit(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
     let ctx = query_ctx(&st, req).await?;
@@ -316,11 +394,11 @@ use axum::http::StatusCode;
 pub async fn backup_run(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
     let ctx = query_ctx(&st, req).await?;
     require_admin(&st, &ctx)?;
-    let out = {
-        let conn = st.db.lock().unwrap();
-        crate::backup::run_backup(&st.cfg, &st.ops, &conn)
-            .map_err(|e| ApiError::internal_msg(format!("Backup failed: {e}")))
-    }?;
+    // run_backup manages its own short locks internally (F3 fix); the admin
+    // handler must NOT hold the global DB mutex while the slow blob-tree
+    // archive is written.
+    let out = crate::backup::run_backup(&st.cfg, &st.ops, &st.db)
+        .map_err(|e| ApiError::internal_msg(format!("Backup failed: {e}")))?;
     {
         let conn = st.db.lock().unwrap();
         db::audit(&conn, &db::AuditEntry { actor: "admin", action: "backup.run", app_id: None, target: &out.backup_id, ip: &ctx.client_ip(), decision: "allow" }, Config::now());

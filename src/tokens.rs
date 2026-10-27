@@ -159,6 +159,7 @@ mod tests {
             encrypt_blobs: true,
             soft_delete_grace_secs: 7 * 86400,
             purge_interval_secs: 600,
+            allow_non_loopback_admin: false,
         };
         let conn = open_db(&cfg.db_path).unwrap();
         migrate(&conn).unwrap();

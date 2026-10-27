@@ -1,11 +1,15 @@
 /* ============================================================
- * 管理控制台前端邏輯（純手寫、零依賴、零外部請求）
+ * Admin console front-end logic (hand-written, zero dependencies,
+ * zero external requests)
  *
- * 安全模型：
- *  - 管理員權杖僅存 sessionStorage，不進 localStorage / URL / cookie。
- *  - 所有 API 回傳資料一律以 textContent / DOM 屬性渲染，
- *    全程不對不可信資料使用 innerHTML（見 INTEGRATION.md 核對清單）。
- *  - app_secret 只在「建立 / 輪換」成功後一次性展示，此後不再載入頁面。
+ * Security model:
+ *  - The admin token lives only in sessionStorage, never in
+ *    localStorage / URL / cookie.
+ *  - All API-returned data is rendered via textContent / DOM
+ *    attributes; innerHTML is never used on untrusted data
+ *    (see the INTEGRATION.md checklist).
+ *  - app_secret is shown exactly once after create/rotate and is
+ *    never loaded into the page again.
  * ============================================================
  */
 (function () {
@@ -13,12 +17,12 @@
 
   var TOKEN_KEY = 'fs_admin_token';
 
-  /* API 基底：相對於本頁位置解析。
-   * 頁面若掛在 /admin/ 或 /admin/index.html，此處解析出 /admin/v1/，
-   * 與 admin_router 的 /admin/v1/* 同源，無須硬編碼主機埠號。 */
+  /* API base: resolved relative to this page's location. When the page
+   * is served at /admin/ or /admin/index.html this resolves to /admin/v1/,
+   * same origin as the admin_router's /admin/v1/* — no hard-coded host/port. */
   var API_BASE = new URL('v1/', document.baseURI).pathname.replace(/\/$/, '');
 
-  /* ---------- 小型 DOM 工具（不使用 innerHTML 渲染資料） ---------- */
+  /* ---------- Small DOM helpers (no innerHTML for data) ---------- */
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -28,7 +32,7 @@
         if (v == null || v === false) return;
         if (k === 'class') el.className = v;
         else if (k === 'text') el.textContent = v;
-        else if (k === 'html') el.innerHTML = v; /* 僅供靜態骨架，不夾使用者資料 */
+        else if (k === 'html') el.innerHTML = v; /* static skeleton only; never carries user data */
         else if (k.slice(0, 2) === 'on' && typeof v === 'function') {
           el.addEventListener(k.slice(2).toLowerCase(), v);
         } else if (k === 'dataset') {
@@ -49,7 +53,7 @@
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  /* ---------- 格式化 ---------- */
+  /* ---------- Formatting ---------- */
 
   function fmtBytes(n) {
     if (n == null || isNaN(n)) return '—';
@@ -68,7 +72,7 @@
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
 
-  /* ---------- API 呼叫 ---------- */
+  /* ---------- API calls ---------- */
 
   function token() { return sessionStorage.getItem(TOKEN_KEY); }
 
@@ -82,7 +86,7 @@
       opts.body = JSON.stringify(body);
     }
     return fetch(API_BASE + path, opts).then(function (res) {
-      if (res.status === 401) { doLogout(); throw new ApiError(401, 'unauthorized', '權杖無效或已過期，請重新登入。'); }
+      if (res.status === 401) { doLogout(); throw new ApiError(401, 'unauthorized', 'Token invalid or expired. Please sign in again.'); }
       return res.text().then(function (txt) {
         var data = null;
         try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = null; }
@@ -98,7 +102,7 @@
   function ApiError(status, code, message) { this.status = status; this.code = code; this.message = message; }
   ApiError.prototype = Object.create(Error.prototype);
 
-  /* ---------- 通用 UI 元件 ---------- */
+  /* ---------- Shared UI components ---------- */
 
   function showGlobalError(msg) {
     var el = document.getElementById('global-error');
@@ -139,7 +143,7 @@
       title: title,
       body: h('p', { text: message }),
       actions: [
-        h('button', { class: 'btn btn-ghost', text: '取消', onclick: closeModal }),
+        h('button', { class: 'btn btn-ghost', text: 'Cancel', onclick: closeModal }),
         btn
       ]
     });
@@ -149,7 +153,7 @@
     return h('span', { class: 'badge badge-' + status, text: label });
   }
 
-  /* ---------- 登入 / 登出 ---------- */
+  /* ---------- Login / logout ---------- */
 
   function doLogout() {
     sessionStorage.removeItem(TOKEN_KEY);
@@ -178,16 +182,16 @@
         afterLogin();
       }).catch(function (err) {
         sessionStorage.removeItem(TOKEN_KEY);
-        errEl.textContent = (err.status === 401) ? '權杖不正確，登入失敗。' : ('無法連接管理 API：' + err.message);
+        errEl.textContent = (err.status === 401) ? 'Invalid token. Sign-in failed.' : ('Cannot reach the admin API: ' + err.message);
         errEl.hidden = false;
       });
     });
     document.getElementById('btn-logout').addEventListener('click', doLogout);
   }
 
-  /* ---------- 視圖切換 ---------- */
+  /* ---------- View switching ---------- */
 
-  var VIEW_TITLES = { apps: '應用程式', audit: '稽核記錄', backup: '備份' };
+  var VIEW_TITLES = { apps: 'Apps', audit: 'Audit Log', backup: 'Backup' };
   var currentView = 'apps';
 
   function switchView(name) {
@@ -208,21 +212,21 @@
     clear(wrap);
     if (currentView === 'apps') {
       wrap.appendChild(h('button', {
-        class: 'btn btn-primary', text: '建立應用程式', onclick: openCreateAppModal
+        class: 'btn btn-primary', text: 'Create App', onclick: openCreateAppModal
       }));
     } else if (currentView === 'audit') {
       wrap.appendChild(h('button', {
-        class: 'btn btn-ghost', text: '重新整理', onclick: loadAudit
+        class: 'btn btn-ghost', text: 'Refresh', onclick: loadAudit
       }));
     }
   }
 
-  /* ---------- 應用程式列表 ---------- */
+  /* ---------- App list ---------- */
 
   function loadApps() {
     var wrap = document.getElementById('apps-table-wrap');
     clear(wrap);
-    wrap.appendChild(h('div', { class: 'loading', text: '載入中…' }));
+    wrap.appendChild(h('div', { class: 'loading', text: 'Loading…' }));
     api('GET', '/apps').then(function (res) {
       renderApps(res.data.apps || []);
     }).catch(function (e) {
@@ -234,14 +238,14 @@
     var wrap = document.getElementById('apps-table-wrap');
     clear(wrap);
     if (!apps.length) {
-      wrap.appendChild(h('div', { class: 'empty', text: '尚無應用程式，按右上角「建立應用程式」新增。' }));
+      wrap.appendChild(h('div', { class: 'empty', text: 'No apps yet. Use "Create App" in the top-right corner.' }));
       return;
     }
 
     var table = h('table', {}, [
       h('thead', {}, [h('tr', {}, [
-        th('應用程式'), th('App Key'), th('狀態'),
-        th('用量'), th('配額'), th('單檔上限'), th('建立時間'), th('操作', 'right')
+        th('App'), th('App Key'), th('Status'),
+        th('Usage'), th('Quota'), th('Max File'), th('Created'), th('Actions', 'right')
       ])]),
       h('tbody', {}, apps.map(function (a) { return appRow(a); }))
     ]);
@@ -254,8 +258,8 @@
 
   function appRow(a) {
     var deleted = !!a.deleted_at;
-    var statusBadge = deleted ? badge('danger', '已刪除')
-      : a.enabled ? badge('ok', '啟用中') : badge('warn', '已停用');
+    var statusBadge = deleted ? badge('danger', 'Deleted')
+      : a.enabled ? badge('ok', 'Active') : badge('warn', 'Disabled');
 
     var pct = (a.quota_bytes > 0 && a.usage_bytes != null)
       ? Math.min(100, Math.round(a.usage_bytes / a.quota_bytes * 100)) : null;
@@ -269,25 +273,26 @@
     ]);
 
     var actions = h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;' }, [
-      h('button', { class: 'btn btn-ghost btn-sm', text: '用量', onclick: function () { openUsage(a.app_id); } }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'Usage', onclick: function () { openUsage(a.app_id); } }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'Users', onclick: function () { openUsers(a); } }),
       deleted ? null : h('button', {
         class: 'btn btn-ghost btn-sm',
-        text: a.enabled ? '停用' : '啟用',
+        text: a.enabled ? 'Disable' : 'Enable',
         onclick: function () { toggleApp(a); }
       }),
       deleted ? null : h('button', {
-        class: 'btn btn-ghost btn-sm', text: '輪換密鑰',
+        class: 'btn btn-ghost btn-sm', text: 'Rotate Secret',
         onclick: function () { openRotate(a); }
       }),
       deleted ? null : h('button', {
-        class: 'btn btn-danger-ghost btn-sm', text: '刪除',
+        class: 'btn btn-danger-ghost btn-sm', text: 'Delete',
         onclick: function () { deleteApp(a); }
       })
     ]);
 
     return h('tr', {}, [
       h('td', {}, [
-        h('div', { text: a.name || '(未命名)' }),
+        h('div', { text: a.name || '(unnamed)' }),
         h('div', { class: 'cell-muted', text: 'ID #' + a.app_id })
       ]),
       h('td', {}, [h('span', { class: 'mono cell-2', text: a.app_key || '—' })]),
@@ -300,37 +305,37 @@
     ]);
   }
 
-  /* ---------- 建立應用程式 ---------- */
+  /* ---------- Create app ---------- */
 
   function openCreateAppModal() {
-    var nameI = h('input', { type: 'text', required: true, maxlength: '120', placeholder: '例如：客服後台' });
+    var nameI = h('input', { type: 'text', required: true, maxlength: '120', placeholder: 'e.g. Support Desk' });
     var quotaGiB = h('input', { type: 'number', min: '1', step: '1', value: '10' });
     var maxMiB = h('input', { type: 'number', min: '1', step: '1', value: '100' });
 
     var body = h('div', {}, [
-      field('應用程式名稱', nameI),
-      field('儲存配額（GiB，1 GiB = 1024³ B）', quotaGiB),
-      field('單檔上限（MiB）', maxMiB)
+      field('App Name', nameI),
+      field('Storage Quota (GiB, 1 GiB = 1024³ B)', quotaGiB),
+      field('Max File Size (MiB)', maxMiB)
     ]);
 
     var submit = h('button', {
-      class: 'btn btn-primary', text: '建立',
+      class: 'btn btn-primary', text: 'Create',
       onclick: function () {
         var name = nameI.value.trim();
         if (!name) { nameI.focus(); return; }
         var quota = parseInt(quotaGiB.value, 10) * 1024 * 1024 * 1024;
         var maxp = parseInt(maxMiB.value, 10) * 1024 * 1024;
-        if (!quota || quota <= 0 || !maxp || maxp <= 0) { showGlobalError('配額與單檔上限必須為正整數。'); return; }
+        if (!quota || quota <= 0 || !maxp || maxp <= 0) { showGlobalError('Quota and max file size must be positive integers.'); return; }
         api('POST', '/apps', { name: name, quota_bytes: quota, max_payload_bytes: maxp }).then(function (res) {
           closeModal();
-          showSecretOnce('建立成功', res.data);
+          showSecretOnce('App created', res.data);
           loadApps();
         }).catch(function (e) { showGlobalError(e.message); });
       }
     });
 
-    openModal({ title: '建立應用程式', body: body, actions: [
-      h('button', { class: 'btn btn-ghost', text: '取消', onclick: closeModal }), submit
+    openModal({ title: 'Create App', body: body, actions: [
+      h('button', { class: 'btn btn-ghost', text: 'Cancel', onclick: closeModal }), submit
     ]});
   }
 
@@ -340,16 +345,16 @@
     ]);
   }
 
-  /* ---------- 用量明細 ---------- */
+  /* ---------- Usage details ---------- */
 
   function openUsage(id) {
     api('GET', '/apps/' + id + '/usage').then(function (res) {
       var u = res.data;
       var rows = [
-        ['已用空間', fmtBytes(u.usage_bytes)],
-        ['儲存配額', fmtBytes(u.quota_bytes)],
-        ['檔案數量', String(u.file_count)],
-        ['有效下載令牌', String(u.active_token_count)]
+        ['Used', fmtBytes(u.usage_bytes)],
+        ['Quota', fmtBytes(u.quota_bytes)],
+        ['Files', String(u.file_count)],
+        ['Active download tokens', String(u.active_token_count)]
       ];
       var body = h('table', {}, [h('tbody', {}, rows.map(function (r) {
         return h('tr', {}, [
@@ -357,55 +362,55 @@
           h('td', { class: 'mono', text: r[1] })
         ]);
       }))]);
-      openModal({ title: '用量明細 · App #' + id, body: body, actions: [
-        h('button', { class: 'btn btn-ghost', text: '關閉', onclick: closeModal })
+      openModal({ title: 'Usage · App #' + id, body: body, actions: [
+        h('button', { class: 'btn btn-ghost', text: 'Close', onclick: closeModal })
       ]});
     }).catch(function (e) { showGlobalError(e.message); });
   }
 
-  /* ---------- 啟用 / 停用 ---------- */
+  /* ---------- Enable / disable ---------- */
 
   function toggleApp(a) {
     var next = !a.enabled;
     confirmModal(
-      next ? '啟用應用程式' : '停用應用程式',
-      next ? '確定要重新啟用「' + (a.name || '') + '」嗎？'
-           : '停用後該 App 的所有上傳／下載／令牌簽署將立即拒絕。確定停用？',
-      next ? '啟用' : '停用', !next,
+      next ? 'Enable App' : 'Disable App',
+      next ? 'Re-enable "' + (a.name || '') + '"?'
+           : 'Once disabled, all uploads/downloads/token signing for this app are rejected immediately. Disable it?',
+      next ? 'Enable' : 'Disable', !next,
       function () {
         return api('PATCH', '/apps/' + a.app_id, { enabled: next }).then(loadApps);
       }
     );
   }
 
-  /* ---------- 輪換密鑰 ---------- */
+  /* ---------- Rotate secret ---------- */
 
   function openRotate(a) {
     confirmModal(
-      '輪換 App Secret',
-      '輪換後「' + (a.name || '') + '」的舊 secret 立即失效，所有以舊 secret 簽發的 HMAC 與使用者 JWT 都會失敗。請確定後端已可同步更新。',
-      '確定輪換', true,
+      'Rotate App Secret',
+      'After rotation, the old secret for "' + (a.name || '') + '" is invalid immediately; all HMAC signatures and user JWTs issued with it will fail. Make sure your backend is updated before continuing.',
+      'Rotate', true,
       function () {
         return api('POST', '/apps/' + a.app_id + '/secret/rotate').then(function (res) {
           closeModal();
-          showSecretOnce('輪換成功', res.data);
+          showSecretOnce('Secret rotated', res.data);
         });
       }
     );
   }
 
-  /* ---------- 一次性展示 secret（建立／輪換共用） ---------- */
+  /* ---------- One-time secret display (create/rotate) ---------- */
 
   function showSecretOnce(title, data) {
-    var copyBtn = h('button', { class: 'btn btn-ghost btn-sm', text: '複製' });
+    var copyBtn = h('button', { class: 'btn btn-ghost btn-sm', text: 'Copy' });
     copyBtn.addEventListener('click', function () {
       if (navigator.clipboard) navigator.clipboard.writeText(data.app_secret).then(function () {
-        copyBtn.textContent = '已複製';
+        copyBtn.textContent = 'Copied';
       });
     });
     var body = h('div', {}, [
       h('p', { class: 'form-error', style: 'margin:0 0 10px;',
-               text: '此 secret 只會顯示這一次，伺服器不再回傳，請立即複製並妥善保存。' }),
+               text: 'This secret is shown only once and is never returned again by the server. Copy it now and store it safely.' }),
       h('div', { class: 'field' }, [
         h('span', { class: 'field-label', text: 'App Key' }),
         h('div', { class: 'mono', text: data.app_key || ('app_' + data.app_id) })
@@ -417,29 +422,92 @@
       h('div', { style: 'margin-top:10px;' }, [copyBtn])
     ]);
     openModal({ title: title, body: body, actions: [
-      h('button', { class: 'btn btn-primary', text: '我已妥善保存', onclick: closeModal })
+      h('button', { class: 'btn btn-primary', text: 'I have saved it', onclick: closeModal })
     ]});
   }
 
-  /* ---------- 刪除（軟刪除） ---------- */
+  /* ---------- Delete (soft delete) ---------- */
 
   function deleteApp(a) {
     confirmModal(
-      '刪除應用程式',
-      '「' + (a.name || '') + '」將被軟刪除（立即停用、不再可被任何 API 存取）。此動作不可恢復。確定刪除？',
-      '確定刪除', true,
+      'Delete App',
+      '"' + (a.name || '') + '" will be soft-deleted (disabled immediately, no longer accessible via any API). This cannot be undone. Delete it?',
+      'Delete', true,
       function () {
         return api('DELETE', '/apps/' + a.app_id).then(loadApps);
       }
     );
   }
 
-  /* ---------- 稽核記錄 ---------- */
+  /* ---------- User management (admin-provisioned directory) ---------- */
+
+  function openUsers(a) {
+    var wrap = h('div', {});
+    var listWrap = h('div', { class: 'cell-muted', style: 'margin-bottom:14px;min-height:20px;', text: 'Loading…' });
+    var msg = h('p', { class: 'form-error', style: 'margin:10px 0 0;', hidden: true });
+    var input = h('input', {
+      type: 'text', maxlength: '128', spellcheck: 'false',
+      autocapitalize: 'off', autocomplete: 'off',
+      placeholder: 'New user ID (e.g. u_10086)'
+    });
+    var addBtn = h('button', { class: 'btn btn-primary btn-sm', text: 'Add User' });
+
+    function load() {
+      api('GET', '/apps/' + a.app_id + '/users').then(function (res) {
+        var users = res.data.users || [];
+        clear(listWrap);
+        if (!users.length) {
+          listWrap.appendChild(document.createTextNode('No users yet. You can pre-provision a user_id below; the app also records users automatically on upload.'));
+          return;
+        }
+        users.forEach(function (u) {
+          listWrap.appendChild(h('div', { style: 'display:flex;justify-content:space-between;gap:10px;padding:3px 0;' }, [
+            h('span', { class: 'mono', text: u.user_id }),
+            h('span', { class: 'cell-muted', text: fmtTs(u.created_at) })
+          ]));
+        });
+      }).catch(function (e) {
+        clear(listWrap);
+        listWrap.appendChild(document.createTextNode('Failed to load: ' + e.message));
+      });
+    }
+
+    addBtn.addEventListener('click', function () {
+      var uid = input.value.trim();
+      if (!uid) { input.focus(); return; }
+      msg.hidden = true;
+      api('POST', '/apps/' + a.app_id + '/users', { user_id: uid }).then(function (res) {
+        input.value = '';
+        msg.style.color = res.data.created ? '#2f9e44' : '#c05621';
+        msg.textContent = res.data.created
+          ? 'User "' + uid + '" added.'
+          : 'User "' + uid + '" already exists.';
+        msg.hidden = false;
+        load();
+      }).catch(function (e) {
+        msg.style.color = '';
+        msg.textContent = e.message;
+        msg.hidden = false;
+      });
+    });
+
+    wrap.appendChild(listWrap);
+    wrap.appendChild(h('div', { style: 'display:flex;gap:8px;align-items:center;' }, [input, addBtn]));
+    wrap.appendChild(msg);
+    load();
+    openModal({
+      title: 'Users · App #' + a.app_id + (a.name ? ' — ' + a.name : ''),
+      body: wrap,
+      actions: [h('button', { class: 'btn btn-ghost', text: 'Close', onclick: closeModal })]
+    });
+  }
+
+  /* ---------- Audit log ---------- */
 
   function loadAudit() {
     var wrap = document.getElementById('audit-table-wrap');
     clear(wrap);
-    wrap.appendChild(h('div', { class: 'loading', text: '載入中…' }));
+    wrap.appendChild(h('div', { class: 'loading', text: 'Loading…' }));
 
     var appId = document.getElementById('audit-app-id').value.trim();
     var since = document.getElementById('audit-since').value;
@@ -457,12 +525,12 @@
     var wrap = document.getElementById('audit-table-wrap');
     clear(wrap);
     if (!entries.length) {
-      wrap.appendChild(h('div', { class: 'empty', text: '此範圍內沒有稽核紀錄。' }));
+      wrap.appendChild(h('div', { class: 'empty', text: 'No audit entries in this range.' }));
       return;
     }
     var table = h('table', {}, [
       h('thead', {}, [h('tr', {}, [
-        th('時間'), th('動作'), th('App'), th('主體'), th('目標'), th('IP'), th('判決')
+        th('Time'), th('Action'), th('App'), th('Actor'), th('Target'), th('IP'), th('Decision')
       ])]),
       h('tbody', {}, entries.map(function (e) {
         return h('tr', {}, [
@@ -472,26 +540,26 @@
           h('td', {}, [h('span', { class: 'mono cell-2', text: e.actor || '—' })]),
           h('td', {}, [h('span', { class: 'cell-2', text: e.target || '—' })]),
           h('td', { class: 'cell-2', text: e.ip || '—' }),
-          h('td', {}, [e.decision === 'allow' ? badge('ok', '允許') : badge('danger', '拒絕')])
+          h('td', {}, [e.decision === 'allow' ? badge('ok', 'Allow') : badge('danger', 'Deny')])
         ]);
       }))
     ]);
     wrap.appendChild(table);
   }
 
-  /* ---------- 備份（端點未實作時優雅降級） ---------- */
+  /* ---------- Backup (degrades gracefully when endpoint absent) ---------- */
 
   function loadBackup() {
     var wrap = document.getElementById('backup-wrap');
     clear(wrap);
-    wrap.appendChild(h('div', { class: 'loading', text: '檢查備份功能…' }));
+    wrap.appendChild(h('div', { class: 'loading', text: 'Checking backup support…' }));
     api('GET', '/backups').then(function (res) {
       renderBackupAvailable(res.data || {});
     }).catch(function (e) {
       if (e.status === 404 || e.status === 501) {
         renderBackupDisabled();
       } else {
-        showGlobalError('備份功能載入失敗：' + e.message);
+        showGlobalError('Failed to load backup: ' + e.message);
       }
     });
   }
@@ -501,9 +569,9 @@
     clear(wrap);
     wrap.appendChild(h('div', { class: 'empty', style: 'padding:48px 24px;' }, [
       h('div', { class: 'banner banner-warn', style: 'margin:0 auto 12px;max-width:420px;',
-                 text: '此功能尚未啟用（後端尚無 /admin/v1/backups 端點）。' }),
+                 text: 'Not enabled yet (the backend has no /admin/v1/backups endpoint).' }),
       h('div', { class: 'cell-muted',
-                 text: '目前請於伺服器本機層以 sqlite3 .backup + rsync/restic 手動備份資料庫與 blob 目錄。' })
+                 text: 'For now, back up the database and blob directory manually at the host level with sqlite3 .backup + rsync/restic.' })
     ]));
   }
 
@@ -512,17 +580,17 @@
     clear(wrap);
     var list = (data.backups || data.entries || []);
     wrap.appendChild(h('div', { style: 'padding:16px 18px;display:flex;gap:8px;align-items:center;' }, [
-      h('button', { class: 'btn btn-primary btn-sm', text: '立即備份', onclick: function () {
+      h('button', { class: 'btn btn-primary btn-sm', text: 'Back Up Now', onclick: function () {
         api('POST', '/backups/run').then(loadBackup).catch(function (e) { showGlobalError(e.message); });
       }}),
-      h('span', { class: 'cell-muted', text: '規範定義但仍可能隨版本變動' })
+      h('span', { class: 'cell-muted', text: 'Spec-defined; may change between versions' })
     ]));
     if (!list.length) {
-      wrap.appendChild(h('div', { class: 'empty', text: '尚無備份紀錄。' }));
+      wrap.appendChild(h('div', { class: 'empty', text: 'No backups yet.' }));
       return;
     }
     wrap.appendChild(h('table', {}, [
-      h('thead', {}, [h('tr', {}, [th('ID'), th('狀態'), th('大小'), th('完成時間')])]),
+      h('thead', {}, [h('tr', {}, [th('ID'), th('Status'), th('Size'), th('Finished')])]),
       h('tbody', {}, list.map(function (b) {
         return h('tr', {}, [
           h('td', { class: 'mono', text: String(b.id != null ? b.id : '—') }),
@@ -534,7 +602,7 @@
     ]));
   }
 
-  /* ---------- 初始化 ---------- */
+  /* ---------- Init ---------- */
 
   function init() {
     initLogin();

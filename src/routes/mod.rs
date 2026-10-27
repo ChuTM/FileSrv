@@ -169,6 +169,12 @@ pub fn public_router(state: AppState) -> Router {
             "/v1/download/{token}",
             axum::routing::get(download::download).head(download::download_head),
         )
+        // RFC 9116 security.txt — public disclosure file (no secrets; loopback
+        // would make it unreachable for external reporters).
+        .route(
+            "/.well-known/security.txt",
+            axum::routing::get(crate::admin_ui::security_txt),
+        )
         .with_state(state)
 }
 
@@ -193,6 +199,10 @@ pub fn admin_router(state: AppState) -> Router {
             axum::routing::post(admin::rotate_secret),
         )
         .route("/admin/v1/apps/{id}/usage", axum::routing::get(admin::app_usage))
+        .route(
+            "/admin/v1/apps/{id}/users",
+            axum::routing::post(admin::add_user).get(admin::list_users),
+        )
         .route("/admin/v1/audit", axum::routing::get(admin::list_audit))
         .route("/admin/v1/backups/run", axum::routing::post(admin::backup_run))
         .route("/admin/v1/backups", axum::routing::get(admin::backup_list))

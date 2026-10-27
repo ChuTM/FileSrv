@@ -110,8 +110,19 @@ behind a trusted reverse proxy that overwrites that header. Leftover `tmp_*`
 blobs are swept at startup; a background maintenance loop (every
 `TENANT_FS_PURGE_INTERVAL_SECS`, default 600s) prunes expired nonces, old
 audit rows (`TENANT_FS_AUDIT_RETENTION_DAYS`), expired `tokens`, soft-delete
-tombstones past the grace window, finished exports past their TTL, and
-interrupted chunked-upload sessions.
+tombstones past the grace window, finished exports past their TTL, interrupted
+chunked-upload sessions, and the plaintext decrypt cache past
+`TENANT_FS_DEC_CACHE_TTL_SECS` (default 86400, see `Documents/Ops-and-Backup.md`).
+
+Additional hardening knobs:
+
+- `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN` (default `false`) — the server refuses to
+  start when the admin bind is not loopback unless this is explicitly set.
+- Downloads count against the same per-app rate-limit budget
+  (`TENANT_FS_RATE_LIMIT_PER_MIN`) as upload/generate/export.
+- Users are provisioned by the operator via `POST /admin/v1/apps/{id}/users`
+  (also in the admin console, "用戶" button); user_ids containing path
+  separators / `..` / control characters are rejected on upload and in admin.
 
 ## Layout
 

@@ -1,0 +1,12 @@
+# security.txt — security disclosure contact policy (RFC 9116)
+# https://www.rfc-editor.org/rfc/rfc9116
+#
+# If you believe you have found a security issue in tenant-fs-server, please
+# report it to the contact below. Do NOT file a public issue with the details.
+# Applicable for files.scc.edu.hk and alb.scc.edu.hk.
+
+Contact: mailto:files@scc.edu.hk
+Contact: mailto:alb@scc.edu.hk
+Expires: 2028-09-01T16:00:00.000Z
+Acknowledgments: https://alphabrate.github.io/files/hall-of-fame/
+Preferred-Languages: en, zh

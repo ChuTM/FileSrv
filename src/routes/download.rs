@@ -1,5 +1,6 @@
 use crate::db;
 use crate::error::{ApiError, ApiResult};
+use crate::ratelimit;
 use crate::state::AppState;
 use crate::storage;
 use crate::tokens;
@@ -16,7 +17,14 @@ pub async fn download(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
         return Err(ApiError::bad_request("Token is required."));
     }
     let ip = client_ip(&st, &req);
-    let (file, path) = resolve_download(&st, &token, &ip).await?;
+    let (file, path, app_id) = resolve_download(&st, &token, &ip).await?;
+    // F7 fix: downloads count against the tenant's rate-limit budget like
+    // every other public endpoint, so a hot link cannot exhaust server I/O
+    // with unbounded token traffic. (Invalid-token requests are already
+    // rejected before any work beyond a single cheap DB row lookup.)
+    if let Err(resp) = ratelimit::gate(&st, app_id) {
+        return Ok(*resp);
+    }
     serve_file(&file, &path, req.headers()).await
 }
 
@@ -30,7 +38,10 @@ pub async fn download_head(AxState(st): AxState<AppState>, req: Request<Body>) -
         return Err(ApiError::bad_request("Token is required."));
     }
     let ip = client_ip(&st, &req);
-    let (file, _path) = resolve_download(&st, &token, &ip).await?;
+    let (file, _path, app_id) = resolve_download(&st, &token, &ip).await?;
+    if let Err(resp) = ratelimit::gate(&st, app_id) {
+        return Ok(*resp);
+    }
     let size = file.size.max(0) as u64;
     let etag = format!("\"sha256-{}\"", file.sha256);
 
@@ -76,11 +87,13 @@ fn client_ip(st: &AppState, req: &Request<Body>) -> String {
 }
 
 /// Shared capability + file resolution for GET and HEAD.
+/// Returns the resolved file, its blob path, and the tenant (app) id so the
+/// caller can apply the per-app rate-limit gate.
 async fn resolve_download(
     st: &AppState,
     token: &str,
     ip: &str,
-) -> Result<(db::FileRow, std::path::PathBuf), ApiError> {
+) -> Result<(db::FileRow, std::path::PathBuf, i64), ApiError> {
     // Capability check: valid, unexpired, unrevoked token (+ IP binding).
     let grant = tokens::verify(&st.db, token, ip)
         .ok_or_else(|| ApiError::not_found("Token not found or expired."))?;
@@ -94,7 +107,7 @@ async fn resolve_download(
     }
     let p = storage::resolve_blob(&st.cfg, grant.app_id, &file.storage_uuid, file.blob_path.as_deref())
         .map_err(|_| ApiError::not_found("File content missing."))?;
-    Ok((file, p))
+    Ok((file, p, grant.app_id))
 }
 
 fn parse_range(spec: &str, size: u64) -> Option<(u64, u64)> {

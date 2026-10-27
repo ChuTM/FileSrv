@@ -53,7 +53,20 @@ pub fn verify_app_signature(
     };
     let secret = crypto::open(server_secret, &app.secret_sealed).ok_or(AuthError::Invalid)?;
 
-    // Replay protection: nonce must be unique (per app).
+    // F1 fix: verify the signature FIRST. The nonce row is only consumed
+    // (written) after the signature checks out, so forged requests — which can
+    // never pass the HMAC comparison — cannot burn rows into the nonces table
+    // (previously an unauthenticated disk/DB-write DoS vector).
+    let canonical = crypto::app_canonical(parts.method, parts.path, parts.query, parts.body_hash, ts, nonce);
+    let expect = crypto::app_signature(&secret, &canonical);
+    if !crypto::constant_time_eq(expect.as_bytes(), signature.as_bytes()) {
+        return Err(AuthError::Invalid);
+    }
+
+    // Replay protection: the nonce must be unique (per app). Because SQLite
+    // serializes writers, "verify first, then insert" still guarantees a
+    // replayed (nonce, signature) pair is rejected: only the first request
+    // wins the INSERT, the replay hits the ON CONFLICT and is denied.
     let inserted = conn
         .execute(
             "INSERT INTO nonces(nonce,app_id,created_at) VALUES(?1,?2,?3) ON CONFLICT(nonce) DO NOTHING",
@@ -62,12 +75,6 @@ pub fn verify_app_signature(
         .map_err(|_| AuthError::Invalid)?;
     if inserted == 0 {
         return Err(AuthError::Invalid); // nonce seen before -> replay
-    }
-
-    let canonical = crypto::app_canonical(parts.method, parts.path, parts.query, parts.body_hash, ts, nonce);
-    let expect = crypto::app_signature(&secret, &canonical);
-    if !crypto::constant_time_eq(expect.as_bytes(), signature.as_bytes()) {
-        return Err(AuthError::Invalid);
     }
     db::audit(&conn, &db::AuditEntry { actor: &format!("app:{}", app.id), action: "auth.app", app_id: Some(app.id), target: parts.path, ip: parts.client_ip, decision: "allow" }, now);
     Ok(app.id)

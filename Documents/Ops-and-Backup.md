@@ -8,12 +8,29 @@
 
 ## 1. What the server actually persists
 
-Two things, and nothing else:
+Everything lives under the working directory by default (the whole tree is the
+"data" directory you copy for a snapshot backup, §5.5):
+
+```
+data/                          <- the one tree to back up
+├── fs.db                      <- TENANT_FS_DB     (SQLite, WAL mode)
+├── blobs/                     <- TENANT_FS_BLOBS  (all user file content)
+│   ├── app_<id>/yyyy/mm/<uuid>   envelope-encrypted blob files ("拆散" layout)
+│   ├── dec_cache/               re-creatable plaintext cache (TTL-swept, §4)
+│   ├── exports/                 finished tar/zip artifacts (TTL-swept)
+│   └── tmp_*                    interrupted-upload partials (swept at boot)
+└── backups/                   <- TENANT_FS_BACKUP_ROOT (built-in backup output)
+```
 
 | Data | Where | Format |
 |---|---|---|
 | Authority DB (apps, files metadata, ACLs, folders, tokens, nonces, audit log, backup records, upload jobs, settings) | `TENANT_FS_DB` (default `data/fs.db`) | SQLite 3, WAL mode, foreign keys on |
 | Blob content | `TENANT_FS_BLOBS` (default `data/blobs`) | Envelope-encrypted files under `blobs/app_<id>/yyyy/mm/<uuid>` (self-contained `TSFS` header); legacy plaintext blobs are read transparently |
+| Built-in backup output | `TENANT_FS_BACKUP_ROOT` (default `data/backups`) | Per-run directories with `db.sqlite` + `blobs.tar` + `manifest.json` |
+
+So yes: **both the database and every user file already live under `data/`**,
+and user files are already split into the `app_<id>/yyyy/mm/<uuid>` layout on
+disk. Nothing else is needed for a file-level restore.
 
 Blobs are **immutable** (written once as UUID, never modified). Tokens are
 regenerable (TTL-bounded). This matters for backup consistency: the blob tree
@@ -52,6 +69,11 @@ Configuration knobs:
   maintenance loop fires a run when the interval has elapsed since the last
   backup. An operator can override schedule / target / retention at runtime via
   `PATCH /admin/v1/backups/config` (the DB value wins over the env default).
+
+**Locking note (F3 fix):** a run only holds the global DB mutex for the short
+`VACUUM INTO` snapshot and the bookkeeping updates. The slow blob-tree tar is
+archived **without** the DB lock, so a big backup no longer stalls every API
+request for its whole duration.
 
 ---
 
@@ -95,6 +117,9 @@ Blobs are envelope-encrypted by default (`TENANT_FS_ENCRYPT_BLOBS=true`):
 - On read, an encrypted blob is materialized to a per-uuid plaintext cache
   under `blob_root/dec_cache/` (atomic swap). That cache is excluded from
   backups and exports; deletion/purge removes the real encrypted file.
+  The cache is now **TTL-swept** (`TENANT_FS_DEC_CACHE_TTL_SECS`, default
+  86400): entries older than the TTL are removed by the maintenance loop, so
+  plaintext does not persist on disk indefinitely (F2 fix).
 
 **Operator duty: store `SERVER_SECRET` separately and securely.** It is the
 single root of trust for both app-secret sealing and blob encryption. Losing
@@ -124,6 +149,53 @@ copy of `SERVER_SECRET` (kept out of the backup media itself).
 
 ---
 
+## 5.5 The simplest option: snapshot the whole `data/` directory
+
+> A ready-to-use script ships with the repo: `scripts/backup.sh <目标路径>
+> [--data <data目录>] [--secret-out <密钥文件>] [--no-verify]`. It performs
+> the WAL checkpoint, the rsync below, an optional `integrity_check`, and an
+> optional separate save of `SERVER_SECRET`. The manual steps are equivalent.
+
+Since the DB and every blob already live under one directory (§1), the
+lowest-friction backup is **a whole-directory copy of `data/`** — no built-in
+API involved. Restore is then literally "copy it back and start the server".
+
+**Backup (`data/` → backup media):**
+
+1. Stop the server, or run `sqlite3 data/fs.db 'PRAGMA wal_checkpoint(TRUNCATE);'`
+   right before copying if you must stay online (a live file copy of a WAL-mode
+   DB is not guaranteed consistent).
+2. Copy the tree, excluding the re-creatable / nested parts:
+   ```bash
+   rsync -a --delete \
+     --exclude 'backups/'       # nested built-in backup output
+     --exclude 'blobs/dec_cache/'   # plaintext cache, re-created on demand
+     --exclude 'blobs/exports/'     # finished export artifacts, re-creatable
+     --exclude 'blobs/tmp_*'        # interrupted-upload partials
+     data/  /backup/media/data-$(date +%F)/
+   ```
+3. Store `SERVER_SECRET` **separately** from the backup media (it is the only
+   key needed to decrypt everything; it must NOT ride inside the copy).
+
+**Restore (backup media → `data/`):**
+
+1. Stop the server.
+2. Replace the whole `data/` directory with the copy (or unpack it to the same
+   path). Excluded sub-directories (`dec_cache/`, `exports/`, `tmp_*`,
+   `backups/`) are simply absent or re-created by the server on demand.
+3. Start the server with the **same `SERVER_SECRET`** and the same
+   `TENANT_FS_DB` / `TENANT_FS_BLOBS` paths that the backup was taken from.
+   The service starts directly on the restored files — no re-import, no
+   migration step.
+4. Verify: `GET /admin/v1/apps/{id}/usage` and a test download.
+
+Why this is safe: blobs are immutable and keyed by UUID, the DB is a single
+SQLite file, and both live under `data/`. Excluding `dec_cache/` / `exports/`
+keeps plaintext out of the backup media (preserving the at-rest-encryption
+story) without losing anything — both are re-created on demand.
+
+---
+
 ## 6. Operational notes on the current build
 
 - **Data safety**: SQLite WAL + foreign keys; single-writer mutex serializes
@@ -145,9 +217,19 @@ copy of `SERVER_SECRET` (kept out of the backup media itself).
   (used by tests/E2E).
 - **Network posture**: public bind defaults to `0.0.0.0:8080`; admin binds to
   `127.0.0.1` only (and the console static assets are 404 on the public
-  router). Put the public port behind TLS (reverse proxy). If you use a proxy
-  that rewrites `X-Forwarded-For`, set `TENANT_FS_TRUST_XFF=true`; otherwise
-  leave it off so clients cannot spoof IP-bound share tokens.
+  router). The server now **refuses to start** on a non-loopback admin bind
+  (F6 fix) unless `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN=true` is set explicitly —
+  that override is NOT recommended. Put the public port behind TLS (reverse
+  proxy). If you use a proxy that rewrites `X-Forwarded-For`, set
+  `TENANT_FS_TRUST_XFF=true`; otherwise leave it off so clients cannot spoof
+  IP-bound share tokens.
+- **Rate limiting**: downloads (GET/HEAD `/v1/download/{token}`) now count
+  against the same per-app budget as upload/generate/export
+  (`TENANT_FS_RATE_LIMIT_PER_MIN`, default 120/min) — a hot link cannot exhaust
+  server I/O with unbounded token traffic (F7 fix).
+- **User directory**: users are provisioned by the operator via
+  `POST /admin/v1/apps/{id}/users` (admin console: "用戶" button on each app);
+  an app can also still vouch for a user at upload time via `X-User-Id`.
 - **Blobs are encrypted on disk** (envelope KEK/DEK, §4). You still need
   volume-level encryption or an encrypted off-site copy for defense-in-depth.
 

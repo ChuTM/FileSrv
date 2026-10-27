@@ -103,8 +103,9 @@ pub fn evaluate_acl(acl: &Acl, subject: &str, action: Action) -> bool {
 /// Effective ACL for a file: allow rules come from the file's own explicit
 /// rules when present, otherwise from the nearest ancestor folder with rules.
 /// `deny` is collected across the WHOLE folder chain and always wins — even
-/// when the file has explicit allow rules (API spec: "deny 全鏈最優先，檔案
-/// 蓋不掉繼承的 deny"); the file's owner keeps default access unless denied.
+/// when the file has explicit allow rules (API spec: "deny is evaluated across
+/// the whole chain first; a file-level allow cannot override an inherited
+/// deny"); the file's owner keeps default access unless denied.
 pub fn effective_acl(conn: &Connection, file: &FileRow) -> rusqlite::Result<Acl> {
     let own = Acl::from_json(&file.acl);
     let file_explicit = !is_empty_allow(&own) || !own.deny.is_empty();

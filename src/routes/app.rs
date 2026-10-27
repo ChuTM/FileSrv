@@ -52,6 +52,30 @@ fn actor_label(identity: &Identity) -> String {
     }
 }
 
+/// Validate a client-supplied user_id BEFORE it is persisted. user_id flows
+/// into export archive entry names (files/<user_id>/<uuid>) and tenant
+/// bookkeeping, so path separators, traversal sequences and control
+/// characters are rejected up front (F4 fix: prevents zip-slip-style archive
+/// entries and garbled tenant keys). Also used by the admin "add user" API.
+pub(crate) fn validate_user_id(user_id: &str) -> Result<(), ApiError> {
+    if user_id.is_empty() || user_id.len() > 128 {
+        return Err(ApiError::bad_request(
+            "Invalid user_id: must be 1..=128 characters.",
+        ));
+    }
+    if user_id.contains('/') || user_id.contains('\\') || user_id.contains("..") {
+        return Err(ApiError::bad_request(
+            "Invalid user_id: must not contain '/', '\\' or '..'.",
+        ));
+    }
+    if user_id.chars().any(|c| c.is_control()) {
+        return Err(ApiError::bad_request(
+            "Invalid user_id: control characters are not allowed.",
+        ));
+    }
+    Ok(())
+}
+
 // ---------------- Upload ----------------
 
 pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
@@ -158,6 +182,7 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
             .to_string(),
         _ => return Err(ApiError::forbidden("Upload not allowed for this identity.")),
     };
+    validate_user_id(&user_id)?;
 
     // Optional folder target (must belong to the app).
     let folder_id = {
@@ -396,6 +421,7 @@ pub async fn upload_init(AxState(st): AxState<AppState>, req: Request<Body>) -> 
             .ok_or_else(|| ApiError::bad_request("X-User-Id header required for app-level upload."))?,
         _ => return Err(ApiError::forbidden("Upload not allowed for this identity.")),
     };
+    validate_user_id(&user_id)?;
 
     let folder_id: Option<i64> = body.get("folder_id").and_then(|v| v.as_i64());
     if let Some(fid) = folder_id {
@@ -1233,6 +1259,29 @@ pub async fn patch_folder(AxState(st): AxState<AppState>, req: Request<Body>) ->
             match db::folder_by_id(&conn, p)? {
                 Some(par) if par.app_id == app_id && par.deleted_at.is_none() && par.id != fid => {}
                 _ => return Err(ApiError::bad_request("Invalid parent folder.")),
+            }
+            // F5 fix: reject a parent that would create a folder cycle.
+            // Walk the chain from the NEW parent towards the root; if the
+            // folder being moved is reached, the update would form a loop.
+            // The guard (100) mirrors the depth guard used elsewhere and is
+            // only a safety net against pathological pre-existing data.
+            let mut cur = p;
+            let mut guard = 0;
+            while guard < 100 {
+                let par = match db::folder_by_id(&conn, cur)? {
+                    Some(f) => f,
+                    None => break,
+                };
+                if par.id == fid {
+                    return Err(ApiError::bad_request(
+                        "Parent would create a folder cycle.",
+                    ));
+                }
+                match par.parent_id {
+                    Some(next) => cur = next,
+                    None => break,
+                }
+                guard += 1;
             }
         }
         conn.execute(

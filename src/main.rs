@@ -9,6 +9,21 @@ use tenant_fs_server::{build_app, Config};
 async fn main() {
     let cfg = Config::from_env();
     let ops = Ops::from_env();
+    // F6 fix: the admin surface (API + console) is designed for loopback only.
+    // Refuse to start on a non-loopback admin bind unless explicitly overridden,
+    // so a misconfigured TENANT_FS_ADMIN_BIND cannot expose it to the network.
+    if !cfg.allow_non_loopback_admin {
+        if let Ok(addr) = cfg.admin_bind.parse::<SocketAddr>() {
+            if !addr.ip().is_loopback() {
+                panic!(
+                    "refusing to bind the admin API to non-loopback address '{}'; \
+                     the admin surface is designed for localhost only. \
+                     Set TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN=true to override at your own risk.",
+                    cfg.admin_bind
+                );
+            }
+        }
+    }
     // Warn loudly when the default server secret (which decrypts every app
     // secret) is left in place (test report §5.6).
     if cfg.server_secret == tenant_fs_server::DEFAULT_SERVER_SECRET {
@@ -64,12 +79,16 @@ async fn main() {
         let mut interval = tokio::time::interval(Duration::from_secs(maintenance_cfg.purge_interval_secs));
         loop {
             interval.tick().await;
-            let (expired, export_paths, upload_paths) = {
+            let now = tenant_fs_server::Config::now();
+            // Short DB-lock section: every prune here is a fast indexed DELETE.
+            // Scheduled backups are NOT run under this lock (F3 fix) — the
+            // backup routine manages its own short locks and does the slow blob
+            // tree archiving without holding the global DB mutex.
+            let (expired, export_paths, upload_paths, backup_due) = {
                 let conn = match prune_db.lock() {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                let now = tenant_fs_server::Config::now();
                 let _ = db::prune_nonces(&conn, 3600);
                 let _ = db::prune_audit(&conn, retention);
                 let _ = db::prune_expired_tokens(&conn);
@@ -85,18 +104,28 @@ async fn main() {
                 // PATCH /admin/v1/backups/config (env default 0 = off), fire a
                 // run when the interval has elapsed since the last backup.
                 let settings = tenant_fs_server::backup::effective_settings(&conn, &maintenance_ops);
-                if settings.schedule_secs > 0 {
+                let backup_due = if settings.schedule_secs > 0 {
                     let last = db::latest_backup_time(&conn).ok().flatten();
-                    let due = match last {
+                    match last {
                         Some(ts) => now - ts >= settings.schedule_secs as i64,
                         None => true,
-                    };
-                    if due {
-                        let _ = tenant_fs_server::backup::run_backup(&maintenance_cfg, &maintenance_ops, &conn);
                     }
-                }
-                (expired, export_paths, upload_paths)
+                } else {
+                    false
+                };
+                (expired, export_paths, upload_paths, backup_due)
             };
+            // Slow work runs OUTSIDE the global DB lock.
+            if backup_due {
+                let _ = tenant_fs_server::backup::run_backup(&maintenance_cfg, &maintenance_ops, &prune_db);
+            }
+            // Plaintext decrypt-cache entries past their TTL are re-creatable
+            // materializations of encrypted blobs; sweep them so plaintext does
+            // not persist indefinitely (F2 fix).
+            let _ = tenant_fs_server::storage::sweep_dec_cache(
+                &maintenance_cfg,
+                now - maintenance_ops.dec_cache_ttl_secs,
+            );
             // DB row unlinked; now unlink the blob files outside the DB lock.
             for t in expired {
                 tenant_fs_server::storage::remove_blob(

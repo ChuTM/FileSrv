@@ -1,6 +1,7 @@
 /* ============================================================
-   管理控制台樣式 — 中性灰 + 青碧 accent（刻意避開靛藍/紫色系）
-   系統字體、零外部資源
+   Admin console styles — neutral gray + teal accent (deliberately
+   avoiding indigo/purple palettes)
+   System fonts, zero external resources
    ============================================================ */
 
 :root {
@@ -13,7 +14,7 @@
   --text-2: #4a5568;
   --muted: #7a8694;
 
-  --accent: #0f766e;        /* 青碧 teal-700 */
+  --accent: #0f766e;        /* teal-700 */
   --accent-hover: #115e59;
   --accent-soft: #e6f4f2;
 
@@ -48,7 +49,7 @@ html, body {
 h1 { font-size: 20px; margin: 14px 0 4px; }
 h2 { font-size: 17px; margin: 0; font-weight: 650; }
 
-/* ---------- 登入 ---------- */
+/* ---------- Login ---------- */
 .login-wrap {
   min-height: 100vh;
   display: flex; align-items: center; justify-content: center;
@@ -79,7 +80,7 @@ h2 { font-size: 17px; margin: 0; font-weight: 650; }
 .brand-mark.sm { width: 26px; height: 26px; border-radius: 7px; }
 .brand-mark.sm::after { inset: 7px 5px; border-width: 1.5px; border-bottom-width: 4px; }
 
-/* ---------- 表單 ---------- */
+/* ---------- Forms ---------- */
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .field.inline .field-label { white-space: nowrap; }
@@ -100,7 +101,7 @@ input:focus, select:focus {
   background: var(--danger-soft); padding: 8px 10px; border-radius: var(--radius-sm);
 }
 
-/* ---------- 按鈕 ---------- */
+/* ---------- Buttons ---------- */
 .btn {
   font: inherit; font-weight: 600;
   padding: 8px 14px; border-radius: var(--radius-sm);
@@ -121,7 +122,7 @@ input:focus, select:focus {
 .btn-sm { padding: 4px 10px; font-size: 12.5px; }
 .btn[disabled] { opacity: .55; cursor: not-allowed; }
 
-/* ---------- 外殼 / 側欄 ---------- */
+/* ---------- Shell / Sidebar ---------- */
 .shell { display: flex; min-height: 100vh; }
 .sidebar {
   width: 220px; flex: none;
@@ -151,7 +152,7 @@ input:focus, select:focus {
 .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .topbar-actions { display: flex; gap: 8px; }
 
-/* ---------- 表格卡片 ---------- */
+/* ---------- Table cards ---------- */
 .table-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow);
@@ -171,7 +172,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .cell-2 { color: var(--text-2); font-size: 12.5px; }
 .cell-muted { color: var(--muted); font-size: 12.5px; }
 
-/* ---------- 徽章 ---------- */
+/* ---------- Badges ---------- */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; font-weight: 600;
@@ -183,27 +184,27 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .badge-danger { background: var(--danger-soft); color: var(--danger); }
 .badge-neutral { background: var(--neutral-soft); color: var(--neutral); }
 
-/* ---------- 用量條 ---------- */
+/* ---------- Quota bar ---------- */
 .quota { min-width: 140px; }
 .quota-bar { height: 6px; background: var(--neutral-soft); border-radius: 999px; overflow: hidden; margin-top: 4px; }
 .quota-fill { height: 100%; background: var(--accent); border-radius: 999px; }
 .quota-fill.hot { background: var(--warn); }
 .quota-fill.full { background: var(--danger); }
 
-/* ---------- 橫幅提示 ---------- */
+/* ---------- Banner ---------- */
 .banner { padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 14px; }
 .banner-error { background: var(--danger-soft); color: var(--danger); }
 .banner-info { background: var(--accent-soft); color: var(--accent-hover); }
 .banner-warn { background: var(--warn-soft); color: var(--warn); }
 
-/* ---------- 過濾列 ---------- */
+/* ---------- Filter bar ---------- */
 .filter-bar { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 14px; flex-wrap: wrap; }
 .filter-bar input { width: 140px; }
 
-/* ---------- 空/載入狀態 ---------- */
+/* ---------- Empty / loading states ---------- */
 .empty, .loading { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13.5px; }
 
-/* ---------- 模態 ---------- */
+/* ---------- Modal ---------- */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(15, 23, 32, .45);
   display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50;
@@ -224,7 +225,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   border-radius: var(--radius-sm); padding: 10px 12px; word-break: break-all;
 }
 
-/* ---------- 響應式 ---------- */
+/* ---------- Responsive ---------- */
 @media (max-width: 760px) {
   .shell { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; align-items: center; gap: 10px; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--border); }
