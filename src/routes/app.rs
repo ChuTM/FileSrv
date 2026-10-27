@@ -275,8 +275,29 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         fid
     };
 
-    // Commit blob into app dir; on failure roll back DB row + usage.
-    if let Err(e) = storage::commit_blob(&st.cfg, app_id, &uuid, &tmp_path) {
+    // Stage the bytes that will be committed to disk. With at-rest encryption
+    // enabled (default) the streamed plaintext temp file is sealed into an
+    // envelope frame (crypto::blob_encrypt, per-blob DEK); the DB row keeps
+    // plaintext size/sha256, so downloads, ranges and quota are unchanged.
+    // KEK = SHA-256(SERVER_SECRET); SERVER_SECRET is never backed up, so a
+    // stolen blob archive without it is undecryptable (see crypto.rs).
+    let staged: std::path::PathBuf = if st.cfg.encrypt_blobs {
+        let plaintext = std::fs::read(&tmp_path).map_err(|_| ApiError::internal())?;
+        let sealed = crypto::blob_encrypt(st.cfg.server_secret.as_bytes(), &plaintext);
+        let enc_path = st.cfg.blob_root.join(format!("tmp_enc_{uuid}"));
+        if let Err(e) = std::fs::write(&enc_path, &sealed) {
+            let _ = std::fs::remove_file(&enc_path);
+            return Err(ApiError::internal_msg(format!("Blob encryption failed: {e}")));
+        }
+        let _ = std::fs::remove_file(&tmp_path);
+        guard.0 = enc_path.clone(); // RAII now guards the staged envelope file
+        enc_path
+    } else {
+        tmp_path.clone()
+    };
+
+    // Commit staged blob into app dir; on failure roll back DB row + usage.
+    if let Err(e) = storage::commit_blob(&st.cfg, app_id, &uuid, &staged) {
         let conn = st.db.lock().unwrap();
         conn.execute("DELETE FROM files WHERE id=?1", params![file_id]).ok();
         conn.execute(
@@ -286,7 +307,7 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         .ok();
         return Err(ApiError::internal_msg(format!("Blob commit failed: {e}")));
     }
-    guard.1 = true; // blob committed; keep the file.
+    guard.1 = true; // blob committed; keep the staged file.
 
     {
         let conn = st.db.lock().unwrap();
@@ -579,7 +600,10 @@ pub async fn delete_file(AxState(st): AxState<AppState>, req: Request<Body>) -> 
         )?;
         db::audit(&conn, &db::AuditEntry { actor: &actor_label(&identity), action: "delete_file", app_id: Some(app_id), target: &file.storage_uuid, ip: &ctx.client_ip(), decision: "allow" }, crate::config::Config::now());
     }
-    storage::remove_blob(&st.cfg, app_id, &file.storage_uuid, file.blob_path.as_deref());
+    // Soft-delete: the blob file is intentionally NOT removed here. It stays
+    // on disk for the grace window (TENANT_FS_SOFT_DELETE_DAYS) and is purged
+    // physically by the background maintenance loop; usage was already rolled
+    // back above and every read/list path excludes tombstones.
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -826,7 +850,9 @@ pub async fn delete_folder(AxState(st): AxState<AppState>, req: Request<Body>) -
             }
         }
     }
-    // Soft-delete folders and their files; free usage; drop tokens; remove blobs.
+    // Soft-delete folders and their files; free usage; drop tokens. Blob files
+    // are NOT unlinked here — they outlive the grace window and are physically
+    // purged by the background maintenance loop (same contract as DELETE file).
     for f_ in &seen {
         conn.execute(
             "UPDATE folders SET deleted_at=?1 WHERE id=?2",
@@ -848,7 +874,6 @@ pub async fn delete_folder(AxState(st): AxState<AppState>, req: Request<Body>) -
                     "UPDATE apps SET usage_bytes = MAX(0, usage_bytes - ?1) WHERE id=?2",
                     params![f.size, app_id],
                 )?;
-                storage::remove_blob(&st.cfg, app_id, &f.storage_uuid, f.blob_path.as_deref());
             }
         }
     }

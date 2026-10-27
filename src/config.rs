@@ -21,6 +21,17 @@ pub struct Config {
     pub trust_xff: bool,
     /// Audit log retention window in seconds (rows older than this are pruned).
     pub audit_retention_secs: i64,
+    /// Encrypt newly written blobs at rest (envelope KEK/DEK, see crypto.rs).
+    /// Default: on. Legacy plaintext blobs are still read transparently.
+    pub encrypt_blobs: bool,
+    /// Soft-delete grace: DELETE marks a tombstone and rolls usage back
+    /// immediately; the blob file and row survive this many seconds and are
+    /// then physically removed by the background purge loop. 0 = purge on
+    /// the next tick (used by tests/E2E to avoid waiting days).
+    pub soft_delete_grace_secs: i64,
+    /// Period of the background maintenance loop (nonce/audit pruning + tombstone
+    /// purge). Short for tests/E2E; 600s in production.
+    pub purge_interval_secs: u64,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -52,6 +63,19 @@ impl Config {
                 .unwrap_or(30)
                 .max(1)
                 * 86400,
+            encrypt_blobs: matches!(
+                env_or("TENANT_FS_ENCRYPT_BLOBS", "true").as_str(),
+                "true" | "1" | "yes" | "on"
+            ),
+            soft_delete_grace_secs: env_or("TENANT_FS_SOFT_DELETE_DAYS", "7")
+                .parse::<i64>()
+                .unwrap_or(7)
+                .max(0)
+                * 86400,
+            purge_interval_secs: env_or("TENANT_FS_PURGE_INTERVAL_SECS", "600")
+                .parse::<u64>()
+                .unwrap_or(600)
+                .clamp(1, 86400),
         }
     }
 

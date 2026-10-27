@@ -39,20 +39,38 @@ async fn main() {
         }
     );
 
-    // Periodic cleanup of expired nonces (they only need to outlive the ±300s
-    // timestamp window) and old audit rows (test report §5.4).
+    // Periodic maintenance: expired nonces (they only need to outlive the
+    // ±300s timestamp window), old audit rows (test report §5.4), and
+    // soft-delete tombstones whose grace window elapsed (physical removal of
+    // the DB row + blob file). Interval is configurable so tests/E2E can run
+    // it quickly; 600s in production.
     let prune_db = db_handle.clone();
     let retention = cfg.audit_retention_secs;
+    let grace = cfg.soft_delete_grace_secs;
+    let maintenance_cfg = cfg.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(600));
+        let mut interval = tokio::time::interval(Duration::from_secs(maintenance_cfg.purge_interval_secs));
         loop {
             interval.tick().await;
-            let conn = match prune_db.lock() {
-                Ok(c) => c,
-                Err(_) => continue,
+            let expired = {
+                let conn = match prune_db.lock() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let _ = db::prune_nonces(&conn, 3600);
+                let _ = db::prune_audit(&conn, retention);
+                let cutoff = tenant_fs_server::Config::now() - grace;
+                db::purge_expired_tombstones(&conn, cutoff).unwrap_or_default()
             };
-            let _ = db::prune_nonces(&conn, 3600);
-            let _ = db::prune_audit(&conn, retention);
+            // DB row unlinked; now unlink the blob files outside the DB lock.
+            for t in expired {
+                tenant_fs_server::storage::remove_blob(
+                    &maintenance_cfg,
+                    t.app_id,
+                    &t.storage_uuid,
+                    t.blob_path.as_deref(),
+                );
+            }
         }
     });
 

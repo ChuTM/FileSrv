@@ -12,12 +12,20 @@ Run against a server started with the default (secure) settings:
   TENANT_FS_ADMIN_TOKEN=dev-admin-token TENANT_FS_SERVER_SECRET=dev-server-secret-change-me
   TENANT_FS_PUBLIC_BIND=127.0.0.1:18080 TENANT_FS_ADMIN_BIND=127.0.0.1:18081
 Do NOT set TENANT_FS_TRUST_XFF (default mode exercises the spoof fixes).
+
+For PART 9 the server must additionally run with the soft-delete test knobs:
+  TENANT_FS_SOFT_DELETE_DAYS=0          # no grace window -> tombstones are due
+                                        # on the next maintenance tick
+  TENANT_FS_PURGE_INTERVAL_SECS=3      # maintenance loop every 3s
+  TENANT_FS_ENCRYPT_BLOBS=true          # (default) envelope encryption at rest
 """
-import hashlib, hmac, http.client, json, os, random, string, sys, time, urllib.parse, uuid, base64
+import hashlib, hmac, http.client, json, os, random, string, sys, time, urllib.parse, uuid, base64, sqlite3
 
 PUB = ("127.0.0.1", 18080)
 ADM = ("127.0.0.1", 18081)
 ADMIN_TOKEN = "dev-admin-token"
+BLOBS = os.environ.get("TENANT_FS_BLOBS", "data/blobs")
+DB_PATH = os.environ.get("TENANT_FS_DB", "data/fs.db")
 
 passed, failed = [], []
 
@@ -354,6 +362,73 @@ s, _, _ = req(PUB, "GET", f"/v1/download/{TOKEN2}")
 check("token after file delete -> 404", s == 404, f"got {s}")
 s, v, _ = json_body(admin_req("GET", f"/admin/v1/apps/{APP_A_ID}/usage"))
 check("usage dropped after delete", s == 200, f"{v}")
+
+print()
+print("=" * 60)
+print("PART 9: soft-delete grace + envelope blob encryption")
+print("=" * 60)
+
+def find_blob_file(app_id, u):
+    base = os.path.join(BLOBS, f"app_{app_id}")
+    if not os.path.isdir(base):
+        return None
+    for dp, _dn, fn in os.walk(base):
+        if u in fn:
+            return os.path.join(dp, u)
+    return None
+
+PROBE = b"soft-delete-probe-payload"
+s, v, _ = json_body(signed_req(APP_KEY, SECRET_A, "POST", "/v1/upload", body=PROBE, extra={"x-user-id": "u1"}))
+check("probe upload -> 200", s == 200, f"{s} {v}")
+PROBE_ID = v.get("file_id")
+PROBE_UUID = v.get("storage_uuid")
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/links/generate", obj={"file_id": PROBE_ID}))
+PROBE_TOK = v.get("token")
+s, data, _ = req(PUB, "GET", f"/v1/download/{PROBE_TOK}")
+check("probe download warmup -> exact bytes", s == 200 and data == PROBE, f"{s}")
+
+# write-new: on-disk blob carries the envelope magic; plaintext is not verbatim
+blob_on_disk = find_blob_file(APP_A_ID, PROBE_UUID)
+head = open(blob_on_disk, "rb").read(4) if blob_on_disk else None
+on_disk = open(blob_on_disk, "rb").read() if blob_on_disk else b""
+check("new upload lands as envelope (TSFS) blob", head == b"TSFS", f"head={head}")
+check("plaintext not stored verbatim on disk", PROBE not in on_disk, "plaintext leaked to disk")
+
+# read-old: simulate a pre-encryption legacy plaintext blob, drop the dec cache
+cache = os.path.join(BLOBS, "dec_cache", PROBE_UUID)
+if os.path.exists(cache):
+    os.remove(cache)
+with open(blob_on_disk, "wb") as f:
+    f.write(PROBE)
+s, data, _ = req(PUB, "GET", f"/v1/download/{PROBE_TOK}")
+check("legacy plaintext blob still downloads (read-old)", s == 200 and data == PROBE, f"{s}")
+
+# soft-delete
+s, _, _ = signed_req(APP_KEY, SECRET_A, "DELETE", f"/v1/files/{PROBE_ID}")
+check("soft-delete probe -> 204", s == 204, f"{s}")
+s, _, _ = req(PUB, "GET", f"/v1/download/{PROBE_TOK}")
+check("download after soft-delete -> 404", s == 404, f"{s}")
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "GET", "/v1/files"))
+check("list excludes soft-deleted file", s == 200 and all(f.get("file_id") != PROBE_ID for f in v.get("files", [])), f"{v}")
+check("blob retained during grace window (not hard-deleted)", os.path.exists(blob_on_disk), f"{blob_on_disk}")
+
+# wait for the maintenance tick (interval ~3s, grace=0) to purge the tombstone
+purged = False
+for _ in range(20):
+    time.sleep(1)
+    if not os.path.exists(blob_on_disk):
+        purged = True
+        break
+check("purge tick physically removes expired blob", purged, f"blob still present: {blob_on_disk}")
+
+n = None
+try:
+    conn = sqlite3.connect(DB_PATH)
+    n = conn.execute("SELECT COUNT(*) FROM files WHERE id=?", (PROBE_ID,)).fetchone()[0]
+    conn.close()
+except Exception as e:
+    print(f"  (sqlite probe failed: {e})")
+check("purge removes DB tombstone row", n == 0, f"count={n}")
 
 print()
 print("=" * 60)

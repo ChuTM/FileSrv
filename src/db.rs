@@ -280,6 +280,58 @@ pub fn prune_audit(conn: &Connection, older_than_secs: i64) -> rusqlite::Result<
     conn.execute("DELETE FROM audit_log WHERE at < ?1", params![cutoff])
 }
 
+/// A tombstoned file whose grace period elapsed: the blob row is about to be
+/// physically deleted, and the caller must unlink its on-disk blob.
+///
+/// NOTE: usage_bytes was already rolled back at DELETE time, so purging never
+/// touches it again.
+pub struct TombstoneFile {
+    pub id: i64,
+    pub app_id: i64,
+    pub storage_uuid: String,
+    pub blob_path: Option<String>,
+}
+
+/// Physically delete tombstones whose `deleted_at < cutoff` and return the
+/// rows (so the caller can unlink their blobs). Also sweeps expired folder
+/// tombstones and any tokens still pointing at purged files.
+pub fn purge_expired_tombstones(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<TombstoneFile>> {
+    let rows: Vec<TombstoneFile> = {
+        let mut stmt = conn.prepare(
+            "SELECT id,app_id,storage_uuid,blob_path
+             FROM files
+             WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok(TombstoneFile {
+                id: r.get(0)?,
+                app_id: r.get(1)?,
+                storage_uuid: r.get(2)?,
+                blob_path: r.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.is_empty() {
+        return Ok(rows);
+    }
+    conn.execute(
+        "DELETE FROM tokens WHERE file_id IN (
+            SELECT id FROM files WHERE deleted_at IS NOT NULL AND deleted_at < ?1
+        )",
+        params![cutoff],
+    )?;
+    conn.execute(
+        "DELETE FROM files WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+        params![cutoff],
+    )?;
+    conn.execute(
+        "DELETE FROM folders WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +375,64 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
             .unwrap();
         assert_eq!(a, 1);
+    }
+
+    #[test]
+    fn purge_expired_tombstones_only_removes_due_rows() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir.path().join("fs.db")).unwrap();
+        migrate(&conn).unwrap();
+        let now = Config::now();
+        conn.execute(
+            "INSERT INTO apps(name,app_key,secret_sealed,quota_bytes,max_payload_bytes,usage_bytes,created_at)
+             VALUES('t','k','s',100,100,0,?1)",
+            params![now],
+        )
+        .unwrap();
+        // Active file (no tombstone) — must survive
+        conn.execute(
+            "INSERT INTO files(app_id,user_id,storage_uuid,logical_path,content_type,size,sha256,classification,owner,acl,created_at)
+             VALUES(1,'u1','uuid-active','p','application/octet-stream',10,'x','internal','u1','{}',?1)",
+            params![now],
+        )
+        .unwrap();
+        // Tombstone that expired 2h ago — eligible
+        conn.execute(
+            "INSERT INTO files(app_id,user_id,storage_uuid,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at)
+             VALUES(1,'u1','uuid-old','p','application/octet-stream',10,'x','internal','u1','{}',?1,?2)",
+            params![now, now - 7200],
+        )
+        .unwrap();
+        // Fresh tombstone (deleted 10s ago) — still inside grace
+        conn.execute(
+            "INSERT INTO files(app_id,user_id,storage_uuid,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at)
+             VALUES(1,'u1','uuid-fresh','p','application/octet-stream',10,'x','internal','u1','{}',?1,?2)",
+            params![now, now - 10],
+        )
+        .unwrap();
+
+        // cutoff = now - 3600: only the old tombstone is due
+        let due = purge_expired_tombstones(&conn, now - 3600).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].storage_uuid, "uuid-old");
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2, "active + fresh tombstone must remain");
+        let due: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE deleted_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(due, 1, "fresh tombstone must remain");
+
+        // Next tick (now - 0): the fresh tombstone becomes due and goes too
+        let due2 = purge_expired_tombstones(&conn, now).unwrap();
+        assert_eq!(due2.len(), 1);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        // Second tick with nothing due is a no-op
+        assert!(purge_expired_tombstones(&conn, now).unwrap().is_empty());
     }
 }

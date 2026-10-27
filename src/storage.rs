@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::crypto;
 use std::path::{Path, PathBuf};
 
 pub fn app_dir(cfg: &Config, app_id: i64) -> PathBuf {
@@ -13,6 +14,33 @@ pub fn app_dir(cfg: &Config, app_id: i64) -> PathBuf {
 /// are O(1); when it is absent/empty (legacy rows), fall back to a bounded
 /// recursive uuid scan for compatibility.
 pub fn resolve_blob(cfg: &Config, app_id: i64, uuid: &str, rel_path: Option<&str>) -> Result<PathBuf, String> {
+    let raw = locate_blob(cfg, app_id, uuid, rel_path)?;
+    // Encrypted-at-rest read path: if the blob file carries the envelope magic,
+    // materialize its decrypted plaintext into a stable per-uuid cache file and
+    // hand that to the caller (download/export stream it transparently).
+    // Legacy plaintext blobs (no magic) are served as-is.
+    if cfg.encrypt_blobs && blob_is_encrypted(&raw) {
+        let cache = dec_cache_path(cfg, uuid)?;
+        if !cache.exists() {
+            let blob = std::fs::read(&raw).map_err(|_| "blob unreadable".to_string())?;
+            let pt = crypto::blob_decrypt(cfg.server_secret.as_bytes(), &blob)
+                .ok_or_else(|| "blob authentication failed".to_string())?;
+            if let Some(parent) = cache.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            // Atomic swap: write a sibling temp, then rename over the cache path.
+            let tmp = cache.with_extension("part");
+            std::fs::write(&tmp, &pt).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, &cache).map_err(|e| e.to_string())?;
+        }
+        return Ok(cache);
+    }
+    Ok(raw)
+}
+
+/// Locate the on-disk blob path (raw bytes, as stored). Used by deletion and
+/// purge so callers remove the real encrypted file, never the decrypted cache.
+pub fn locate_blob(cfg: &Config, app_id: i64, uuid: &str, rel_path: Option<&str>) -> Result<PathBuf, String> {
     let app_root = app_dir(cfg, app_id);
     let canonical_root = app_root
         .canonicalize()
@@ -51,6 +79,34 @@ fn find_uuid(dir: &Path, uuid: &str, depth: usize) -> Option<PathBuf> {
     None
 }
 
+/// Peek the first bytes of a blob file: does it carry the envelope magic?
+fn blob_is_encrypted(path: &Path) -> bool {
+    let mut head = [0u8; 5];
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    use std::io::Read;
+    match f.read(&mut head) {
+        Ok(n) => crypto::looks_like_encrypted_blob(&head[..n]),
+        Err(_) => false,
+    }
+}
+
+/// Per-uuid plaintext cache path used by the encrypted read path.
+///
+/// `uuid` is the server-generated storage_uuid (never client-supplied) and is
+/// restricted to a safe token set before being used as a filename.
+fn dec_cache_path(cfg: &Config, uuid: &str) -> Result<PathBuf, String> {
+    let safe = uuid
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !safe || uuid.is_empty() {
+        return Err("unsafe blob uuid".to_string());
+    }
+    Ok(cfg.blob_root.join("dec_cache").join(uuid))
+}
+
 /// Year/month directory to keep any single directory bounded.
 fn date_subdir(_cfg: &Config) -> (String, String) {
     use chrono::Datelike;
@@ -73,20 +129,82 @@ pub fn blob_rel_for_new(cfg: &Config, uuid: &str) -> String {
     format!("{y}/{m}/{uuid}")
 }
 
-/// Persist a fully-written temp blob into its final UUID path.
-pub fn commit_blob(cfg: &Config, app_id: i64, uuid: &str, tmp_path: &Path) -> Result<PathBuf, String> {
+/// Persist a fully-written staged blob into its final UUID path.
+///
+/// `staged` already holds the bytes that must end up on disk: plaintext when
+/// encryption is disabled, or the envelope frame when it is enabled.
+pub fn commit_blob(cfg: &Config, app_id: i64, uuid: &str, staged: &Path) -> Result<PathBuf, String> {
     let final_path = blob_path_for_new(cfg, app_id, uuid);
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::rename(tmp_path, &final_path).map_err(|e| e.to_string())?;
+    std::fs::rename(staged, &final_path).map_err(|e| e.to_string())?;
     Ok(final_path)
 }
 
+/// Best-effort unlink of a blob file (real on-disk bytes) and its decrypted
+/// cache entry. Used by purge; DELETE must NOT call this during the grace window.
 pub fn remove_blob(cfg: &Config, app_id: i64, uuid: &str, rel_path: Option<&str>) {
-    if let Ok(p) = resolve_blob(cfg, app_id, uuid, rel_path) {
+    if let Ok(p) = locate_blob(cfg, app_id, uuid, rel_path) {
         std::fs::remove_file(p).ok();
     }
+    if let Ok(cache) = dec_cache_path(cfg, uuid) {
+        std::fs::remove_file(cache).ok();
+    }
+}
+
+/// One-time migration for pre-encryption deployments: rewrite every on-disk
+/// blob that is still plaintext into the envelope format in place.
+///
+/// Idempotent and safe to re-run: files already carrying the envelope magic
+/// are skipped, and non-blob directories (`exports/`, `dec_cache/`) and
+/// interrupted-upload leftovers (`tmp_*`) are left alone.
+pub fn migrate_plaintext_blobs(cfg: &Config) -> Result<usize, String> {
+    let root = cfg.blob_root.clone();
+    let mut migrated = 0usize;
+    visit_plaintext(&root, &root, &mut migrated, cfg)?;
+    Ok(migrated)
+}
+
+fn visit_plaintext(
+    dir: &Path,
+    root: &Path,
+    count: &mut usize,
+    cfg: &Config,
+) -> Result<(), String> {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(()),
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            // Skip service directories: export artifacts, decrypted cache.
+            if name == "exports" || name == "dec_cache" {
+                continue;
+            }
+            visit_plaintext(&p, root, count, cfg)?;
+            continue;
+        }
+        if name.starts_with("tmp_") {
+            continue;
+        }
+        // Only blobs inside an app_* tree are migrated.
+        if !p.starts_with(root) {
+            continue;
+        }
+        if blob_is_encrypted(&p) {
+            continue;
+        }
+        let pt = std::fs::read(&p).map_err(|e| e.to_string())?;
+        let sealed = crypto::blob_encrypt(cfg.server_secret.as_bytes(), &pt);
+        let tmp = p.with_extension("encpart");
+        std::fs::write(&tmp, &sealed).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+        *count += 1;
+    }
+    Ok(())
 }
 
 /// Remove leftover `tmp_*` files from interrupted uploads (run at startup).
@@ -123,13 +241,17 @@ mod tests {
             max_batch_acl: 1000,
             trust_xff: false,
             audit_retention_secs: 30 * 86400,
+            encrypt_blobs: true,
+            soft_delete_grace_secs: 7 * 86400,
+            purge_interval_secs: 600,
         }
     }
 
     #[test]
     fn path_traversal_is_blocked() {
         let dir = TempDir::new().unwrap();
-        let cfg = cfg_with(&dir);
+        let mut cfg = cfg_with(&dir);
+        cfg.encrypt_blobs = false; // plaintext files in this test
         let app_root = app_dir(&cfg, 7);
         std::fs::create_dir_all(&app_root).unwrap();
         std::fs::write(app_root.join("victim.txt"), b"secret").unwrap();
@@ -159,7 +281,8 @@ mod tests {
     #[test]
     fn cleanup_stale_tmp_removes_leftovers_only() {
         let dir = TempDir::new().unwrap();
-        let cfg = cfg_with(&dir);
+        let mut cfg = cfg_with(&dir);
+        cfg.encrypt_blobs = false;
         std::fs::create_dir_all(&cfg.blob_root).unwrap();
         std::fs::create_dir_all(cfg.blob_root.join("app_1").join("2026").join("10")).unwrap();
         std::fs::write(cfg.blob_root.join("tmp_abc"), b"partial").unwrap();
@@ -172,5 +295,78 @@ mod tests {
         assert!(!cfg.blob_root.join("tmp_def").exists());
         assert!(cfg.blob_root.join("app_1").join("2026").join("10").join("uuid1").exists());
         assert!(cfg.blob_root.join("readme.txt").exists());
+    }
+
+    #[test]
+    fn encrypted_blob_materializes_plaintext_on_read() {
+        let dir = TempDir::new().unwrap();
+        let cfg = cfg_with(&dir);
+        let app_root = app_dir(&cfg, 3);
+        std::fs::create_dir_all(app_root.join("2026").join("10")).unwrap();
+        let raw = app_root.join("2026").join("10").join("uuid-enc");
+        let env = crypto::blob_encrypt(cfg.server_secret.as_bytes(), b"secret-payload");
+        std::fs::write(&raw, &env).unwrap();
+        assert!(blob_is_encrypted(&raw));
+
+        // First resolve materializes the plaintext cache; bytes are readable
+        let cache = resolve_blob(&cfg, 3, "uuid-enc", Some("2026/10/uuid-enc")).unwrap();
+        assert_eq!(std::fs::read(&cache).unwrap(), b"secret-payload");
+        // Cache path lives under dec_cache, not inside the app tree
+        assert!(cache.starts_with(cfg.blob_root.join("dec_cache")));
+
+        // Second resolve is a cache hit (no decrypt needed)
+        let cache2 = resolve_blob(&cfg, 3, "uuid-enc", Some("2026/10/uuid-enc")).unwrap();
+        assert_eq!(cache2, cache);
+
+        // locate_blob still returns the raw encrypted file (purge uses it)
+        let located = locate_blob(&cfg, 3, "uuid-enc", Some("2026/10/uuid-enc")).unwrap();
+        assert_eq!(std::fs::read(&located).unwrap(), env);
+
+        // remove_blob drops both the raw file and the cache entry
+        remove_blob(&cfg, 3, "uuid-enc", Some("2026/10/uuid-enc"));
+        assert!(!located.exists());
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn legacy_plaintext_blob_is_served_untouched() {
+        let dir = TempDir::new().unwrap();
+        let cfg = cfg_with(&dir);
+        let app_root = app_dir(&cfg, 4);
+        std::fs::create_dir_all(app_root.join("2026").join("10")).unwrap();
+        let raw = app_root.join("2026").join("10").join("uuid-legacy");
+        std::fs::write(&raw, b"legacy-plaintext").unwrap();
+        assert!(!blob_is_encrypted(&raw));
+
+        let p = resolve_blob(&cfg, 4, "uuid-legacy", Some("2026/10/uuid-legacy")).unwrap();
+        // No cache materialization: caller gets the legacy path back
+        assert_eq!(p.canonicalize().unwrap(), raw.canonicalize().unwrap());
+        assert_eq!(std::fs::read(&p).unwrap(), b"legacy-plaintext");
+        assert!(!cfg.blob_root.join("dec_cache").exists());
+    }
+
+    #[test]
+    fn migrate_plaintext_blobs_rewrites_in_place_and_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let cfg = cfg_with(&dir);
+        let app_root = app_dir(&cfg, 5);
+        std::fs::create_dir_all(app_root.join("2026").join("10")).unwrap();
+        let legacy = app_root.join("2026").join("10").join("uuid-mig");
+        std::fs::write(&legacy, b"to-be-encrypted").unwrap();
+        // A leftover tmp file and a service dir must be skipped
+        std::fs::write(cfg.blob_root.join("tmp_zzz"), b"partial").unwrap();
+        std::fs::create_dir_all(cfg.blob_root.join("dec_cache")).unwrap();
+        std::fs::write(cfg.blob_root.join("dec_cache").join("x"), b"cache").unwrap();
+
+        assert_eq!(migrate_plaintext_blobs(&cfg).unwrap(), 1);
+        assert!(blob_is_encrypted(&legacy));
+        // Content decrypts back to the original plaintext
+        let env = std::fs::read(&legacy).unwrap();
+        assert_eq!(
+            crypto::blob_decrypt(cfg.server_secret.as_bytes(), &env).unwrap(),
+            b"to-be-encrypted"
+        );
+        // Idempotent: second run migrates nothing
+        assert_eq!(migrate_plaintext_blobs(&cfg).unwrap(), 0);
     }
 }

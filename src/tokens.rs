@@ -156,6 +156,9 @@ mod tests {
             max_batch_acl: 1000,
             trust_xff: false,
             audit_retention_secs: 30 * 86400,
+            encrypt_blobs: true,
+            soft_delete_grace_secs: 7 * 86400,
+            purge_interval_secs: 600,
         };
         let conn = open_db(&cfg.db_path).unwrap();
         migrate(&conn).unwrap();

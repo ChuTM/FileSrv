@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tenant_fs_server::config::Config;
 use tenant_fs_server::crypto::{self, sha256};
+use tenant_fs_server::db::{self, Db};
+use tenant_fs_server::storage;
 use tenant_fs_server::build_app;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -16,6 +18,7 @@ struct TestCtx {
     cfg: Config,
     public: Router,
     admin: Router,
+    db: Db,
 }
 
 fn cfg_at(dir: &TempDir) -> Config {
@@ -31,18 +34,22 @@ fn cfg_at(dir: &TempDir) -> Config {
         max_batch_acl: 1000,
         trust_xff: false, // secure default: X-Forwarded-For is ignored
         audit_retention_secs: 30 * 86400,
+        encrypt_blobs: true,
+        soft_delete_grace_secs: 7 * 86400,
+        purge_interval_secs: 600,
     }
 }
 
 fn new_test_ctx() -> TestCtx {
     let dir = TempDir::new().unwrap();
     let cfg = cfg_at(&dir);
-    let (public, admin, _db) = build_app(cfg.clone()).unwrap();
+    let (public, admin, db) = build_app(cfg.clone()).unwrap();
     TestCtx {
         _dir: dir,
         cfg,
         public,
         admin,
+        db,
     }
 }
 
@@ -52,12 +59,13 @@ fn new_test_ctx_trust_xff() -> TestCtx {
     let dir = TempDir::new().unwrap();
     let mut cfg = cfg_at(&dir);
     cfg.trust_xff = true;
-    let (public, admin, _db) = build_app(cfg.clone()).unwrap();
+    let (public, admin, db) = build_app(cfg.clone()).unwrap();
     TestCtx {
         _dir: dir,
         cfg,
         public,
         admin,
+        db,
     }
 }
 
@@ -629,12 +637,13 @@ async fn range_and_etag() {
 async fn persistence_across_reopen() {
     let dir = TempDir::new().unwrap();
     let cfg = cfg_at(&dir);
-    let (public, admin, _) = build_app(cfg.clone()).unwrap();
+    let (public, admin, db1) = build_app(cfg.clone()).unwrap();
     let ctx1 = TestCtx {
         _dir: TempDir::new().unwrap(),
         cfg: cfg.clone(),
         public,
         admin,
+        db: db1,
     };
 
     let (app_id, key, secret) = create_app_quota(&ctx1.admin, "A", 1 << 20, 1 << 20).await;
@@ -647,13 +656,14 @@ async fn persistence_across_reopen() {
     let _ = app_id;
 
     // Reopen: brand-new process state, same DB + blob dir
-    let (public2, admin2, _) = build_app(cfg).unwrap();
+    let (public2, admin2, db2) = build_app(cfg).unwrap();
     let (s, b) = download(
         &TestCtx {
             _dir: TempDir::new().unwrap(),
             cfg: ctx1.cfg.clone(),
             public: public2.clone(),
             admin: admin2.clone(),
+            db: db2,
         },
         &token,
         &[],
@@ -976,4 +986,126 @@ async fn healthz_and_admin_soft_delete() {
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------- New: blob envelope encryption ----------------
+
+#[tokio::test]
+async fn encrypted_blob_read_old_write_new() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "Enc", 1 << 20, 1 << 20).await;
+    let content = b"envelope-payload-bytes";
+
+    // Write-new: a fresh upload lands on disk in the envelope format
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", content, "").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let file_id = v["file_id"].as_i64().unwrap();
+    let uuid = v["storage_uuid"].as_str().unwrap().to_string();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    // On-disk raw blob carries the TSFS magic + version
+    let (blob_path, raw) = {
+        let conn = ctx.db.lock().unwrap();
+        let f = db::file_by_id(&conn, file_id).unwrap().unwrap();
+        let raw = storage::locate_blob(&ctx.cfg, app_id, &f.storage_uuid, f.blob_path.as_deref()).unwrap();
+        (f.blob_path.clone(), raw)
+    };
+    let on_disk = std::fs::read(&raw).unwrap();
+    assert!(crypto::looks_like_encrypted_blob(&on_disk[..5]), "new blob must be envelope-encrypted");
+    assert!(!on_disk.windows(content.len()).any(|w| w == content), "plaintext must not appear verbatim on disk");
+
+    // Read-new: download transparently decrypts (via the dec_cache materialization)
+    let (s, b) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(content));
+
+    // Read-old: simulate a legacy plaintext blob from before encryption.
+    // Replace the on-disk blob with raw plaintext, drop the dec_cache entry,
+    // and confirm the legacy path still serves it.
+    let cache = ctx.cfg.blob_root.join("dec_cache").join(&uuid);
+    let _ = std::fs::remove_file(&cache);
+    std::fs::write(&raw, content).unwrap();
+    let (s, b) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK, "legacy plaintext blob must still download");
+    assert_eq!(b, Bytes::from_static(content));
+
+    // Re-encrypt in place via the one-shot migration, then download again
+    let _ = blob_path;
+    assert_eq!(storage::migrate_plaintext_blobs(&ctx.cfg).unwrap(), 1);
+    let on_disk = std::fs::read(&raw).unwrap();
+    assert!(crypto::looks_like_encrypted_blob(&on_disk[..5]));
+    let _ = std::fs::remove_file(&cache);
+    let (s, b) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(content));
+}
+
+// ---------------- New: soft-delete grace lifecycle ----------------
+
+#[tokio::test]
+async fn soft_delete_lifecycle_grace_then_purge() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "Soft", 1 << 20, 1 << 20).await;
+
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"grace-period-content", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let uuid = v["storage_uuid"].as_str().unwrap().to_string();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+    // Warm the download path (materializes the decrypted cache entry)
+    let (s, b) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"grace-period-content"));
+
+    // DELETE -> tombstone
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "DELETE", &format!("/v1/files/{file_id}"), "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // Token/link instant failure; usage rolled back; listing excludes it
+    let (s, _) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "GET", "/v1/files", "", Value::Null, &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["files"].as_array().unwrap().is_empty());
+    let (s, v) = json_of(send(&ctx.admin, admin_req("GET", "/admin/v1/apps/1/usage", Value::Null)).await).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["usage_bytes"], json!(0));
+
+    // Within the grace window the blob file must STILL be on disk (no hard delete)
+    let raw = {
+        let conn = ctx.db.lock().unwrap();
+        let f = db::file_by_id(&conn, file_id).unwrap().unwrap();
+        storage::locate_blob(&ctx.cfg, app_id, &f.storage_uuid, f.blob_path.as_deref()).unwrap()
+    };
+    assert!(raw.exists(), "blob must survive the grace window");
+    let cache = ctx.cfg.blob_root.join("dec_cache").join(&uuid);
+    assert!(cache.exists(), "decrypted cache should still exist");
+
+    // Purge with grace=0 (cutoff slightly in the future absorbs the 1s clock
+    // granularity between DELETE and this call; the time-window semantics are
+    // covered by the db::purge_expired_tombstones unit test).
+    let conn = ctx.db.lock().unwrap();
+    let cutoff = Config::now() + 10;
+    let due = db::purge_expired_tombstones(&conn, cutoff).unwrap();
+    assert_eq!(due.len(), 1);
+    drop(conn);
+    storage::remove_blob(&ctx.cfg, app_id, &uuid, None);
+    assert!(!raw.exists());
+    assert!(!cache.exists());
+    let conn = ctx.db.lock().unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE id=?1", [file_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "row physically purged");
 }
