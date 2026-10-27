@@ -563,6 +563,67 @@ check("export job swept after TTL", gone, f"job still visible")
 
 print()
 print("=" * 60)
+print("PART 11: admin console static assets on loopback admin bind")
+print("=" * 60)
+
+def hdr_ci(hdrs, name):
+    want = name.lower()
+    for k, v in hdrs.items():
+        if k.lower() == want:
+            return v
+    return None
+
+# --- 11.1 page + asset Content-Types and security headers ---
+s, body, hdrs = req(ADM, "GET", "/admin/")
+check("console page GET /admin/ -> 200", s == 200, f"got {s}")
+check("console page is the HTML shell (view-login + app.js)",
+      b'id="view-login"' in body and b"app.js" in body, "")
+check("console page content-type = text/html",
+      (hdr_ci(hdrs, "content-type") or "").startswith("text/html"), f"{hdr_ci(hdrs, 'content-type')}")
+check("console page sends CSP", bool(hdr_ci(hdrs, "content-security-policy")), f"{hdr_ci(hdrs, 'content-security-policy')}")
+check("console page sends X-Frame-Options: DENY",
+      (hdr_ci(hdrs, "x-frame-options") or "").lower() == "deny", f"{hdr_ci(hdrs, 'x-frame-options')}")
+check("console page sends Cache-Control: no-store",
+      (hdr_ci(hdrs, "cache-control") or "") == "no-store", f"{hdr_ci(hdrs, 'cache-control')}")
+
+s, body_js, hdrs_js = req(ADM, "GET", "/admin/app.js")
+check("app.js -> 200 + javascript content-type",
+      s == 200 and "javascript" in (hdr_ci(hdrs_js, "content-type") or ""), f"{s} {hdr_ci(hdrs_js, 'content-type')}")
+s, body_css, hdrs_css = req(ADM, "GET", "/admin/style.css")
+check("style.css -> 200 + css content-type",
+      s == 200 and "css" in (hdr_ci(hdrs_css, "content-type") or ""), f"{s} {hdr_ci(hdrs_css, 'content-type')}")
+# Console must NOT appear on the public bind.
+s, _, _ = req(PUB, "GET", "/admin/")
+check("console page absent on PUBLIC bind -> 404", s == 404, f"got {s}")
+
+# --- 11.2 page-driven round trip (mirrors what the browser console does) ---
+s, _, _ = req(ADM, "GET", "/admin/v1/apps", headers={"authorization": "Bearer wrong-token"})
+check("console's API call with bad token -> 401", s == 401, f"got {s}")
+
+s, v = create_app("E2E-UI-Proxy")
+check("UI-Proxy create -> 200 + one-time secret", s == 200 and bool(v.get("app_secret")), f"{s} {v}")
+UI_ID = v.get("app_id") if s == 200 else None
+
+s, v, _ = json_body(admin_req("GET", "/admin/v1/apps"))
+mine = next((a for a in v.get("apps", []) if a.get("app_id") == UI_ID), None)
+check("UI-Proxy visible in app list", mine is not None and mine.get("enabled") is True, f"{mine}")
+
+s, v, _ = json_body(admin_req("GET", f"/admin/v1/apps/{UI_ID}/usage"))
+check("UI-Proxy usage shape", s == 200 and {"usage_bytes", "quota_bytes", "file_count", "active_token_count"} <= set(v), f"{v}")
+
+s, _, _ = admin_req("PATCH", f"/admin/v1/apps/{UI_ID}", {"enabled": False})
+check("UI-Proxy disable -> 204", s == 204, f"got {s}")
+
+s, v, _ = json_body(admin_req("POST", f"/admin/v1/apps/{UI_ID}/secret/rotate"))
+check("UI-Proxy rotate -> new secret once", s == 200 and bool(v.get("app_secret")), f"{s} {v}")
+
+s, v, _ = json_body(admin_req("GET", f"/admin/v1/audit?app_id={UI_ID}"))
+acts = {e.get("action") for e in v.get("entries", [])}
+check("UI-Proxy audit records create/update/rotate",
+      s == 200 and {"app.create", "app.secret_rotate"} <= acts, f"actions={sorted(acts)}")
+
+print()
+print("=" * 60)
 print("RESULTS")
 print("=" * 60)
 print(f"PASS: {len(passed)}  FAIL: {len(failed)}")

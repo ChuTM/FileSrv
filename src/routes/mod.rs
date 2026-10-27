@@ -174,6 +174,13 @@ pub fn public_router(state: AppState) -> Router {
 
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
+        // Admin console static assets — embedded at compile time, loopback only.
+        // No data ships here; the app itself calls bearer-authenticated /admin/v1/*.
+        .route("/admin", axum::routing::get(crate::admin_ui::index_html))
+        .route("/admin/", axum::routing::get(crate::admin_ui::index_html))
+        .route("/admin/index.html", axum::routing::get(crate::admin_ui::index_html))
+        .route("/admin/app.js", axum::routing::get(crate::admin_ui::app_js))
+        .route("/admin/style.css", axum::routing::get(crate::admin_ui::style_css))
         .route("/admin/v1/apps", axum::routing::post(admin::create_app).get(admin::list_apps))
         .route(
             "/admin/v1/apps/{id}",
