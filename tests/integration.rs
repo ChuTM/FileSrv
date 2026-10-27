@@ -1,0 +1,979 @@
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::Router;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use tempfile::TempDir;
+use tenant_fs_server::config::Config;
+use tenant_fs_server::crypto::{self, sha256};
+use tenant_fs_server::build_app;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+struct TestCtx {
+    _dir: TempDir,
+    cfg: Config,
+    public: Router,
+    admin: Router,
+}
+
+fn cfg_at(dir: &TempDir) -> Config {
+    Config {
+        db_path: dir.path().join("fs.db"),
+        blob_root: dir.path().join("blobs"),
+        admin_token: "test-admin-token".into(),
+        server_secret: "test-server-secret".into(),
+        public_bind: "0.0.0.0:0".into(),
+        admin_bind: "127.0.0.1:0".into(),
+        embed_ttl_secs: 1800,
+        share_ttl_secs: 300,
+        max_batch_acl: 1000,
+        trust_xff: false, // secure default: X-Forwarded-For is ignored
+        audit_retention_secs: 30 * 86400,
+    }
+}
+
+fn new_test_ctx() -> TestCtx {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let (public, admin, _db) = build_app(cfg.clone()).unwrap();
+    TestCtx {
+        _dir: dir,
+        cfg,
+        public,
+        admin,
+    }
+}
+
+/// Test context simulating a deployment behind a trusted reverse proxy:
+/// X-Forwarded-For is honored (the legitimate use of §5.2).
+fn new_test_ctx_trust_xff() -> TestCtx {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = cfg_at(&dir);
+    cfg.trust_xff = true;
+    let (public, admin, _db) = build_app(cfg.clone()).unwrap();
+    TestCtx {
+        _dir: dir,
+        cfg,
+        public,
+        admin,
+    }
+}
+
+async fn send(router: &Router, req: Request<Body>) -> (StatusCode, Bytes) {
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, body)
+}
+
+async fn json_of(resp: (StatusCode, Bytes)) -> (StatusCode, Value) {
+    let (s, b) = resp;
+    (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
+}
+
+/// App-level signed request (X-App-Key + HMAC + timestamp + nonce + body hash).
+fn signed_req_raw(
+    app_key: &str,
+    secret: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &[u8],
+    extra_headers: &[(&str, &str)],
+) -> Request<Body> {
+    let ts = Config::now().to_string();
+    let nonce = format!("n_{}", Uuid::new_v4());
+    let bh = sha256(body);
+    let canonical = crypto::app_canonical(method, path, query, &bh, &ts, &nonce);
+    let sig = crypto::app_signature(secret.as_bytes(), &canonical);
+    let uri = if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    };
+    let mut rb = Request::builder()
+        .method(method)
+        .uri(&uri)
+        .header("x-app-key", app_key)
+        .header("x-app-signature", sig)
+        .header("x-timestamp", ts)
+        .header("x-nonce", nonce);
+    for (k, v) in extra_headers {
+        rb = rb.header(*k, *v);
+    }
+    rb.body(Body::from(body.to_vec())).unwrap()
+}
+
+/// App-level signed request with a JSON body (Value::Null = empty body).
+fn signed_req(
+    app_key: &str,
+    secret: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: Value,
+    extra_headers: &[(&str, &str)],
+) -> Request<Body> {
+    let body_bytes = if body.is_null() {
+        Vec::new()
+    } else {
+        body.to_string().into_bytes()
+    };
+    signed_req_raw(app_key, secret, method, path, query, &body_bytes, extra_headers)
+}
+
+/// User-context JWT request (Authorization: Bearer <jwt>).
+fn jwt_req(secret: &str, app_id: i64, user: &str, method: &str, path: &str, body: Value) -> Request<Body> {
+    let jwt = crypto::jwt_encode(
+        secret.as_bytes(),
+        &format!("app:{app_id}"),
+        user,
+        Config::now() + 3600,
+    );
+    let body_bytes = if body.is_null() {
+        Vec::new()
+    } else {
+        body.to_string().into_bytes()
+    };
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {jwt}"))
+        .body(Body::from(body_bytes))
+        .unwrap()
+}
+
+fn admin_req(method: &str, path: &str, body: Value) -> Request<Body> {
+    let body_bytes = if body.is_null() {
+        Vec::new()
+    } else {
+        body.to_string().into_bytes()
+    };
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", "Bearer test-admin-token")
+        .body(Body::from(body_bytes))
+        .unwrap()
+}
+
+async fn create_app_quota(admin: &Router, name: &str, quota: i64, max_payload: i64) -> (i64, String, String) {
+    let (s, v) = json_of(
+        send(
+            admin,
+            admin_req(
+                "POST",
+                "/admin/v1/apps",
+                json!({ "name": name, "quota_bytes": quota, "max_payload_bytes": max_payload }),
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create app: {v}");
+    (
+        v["app_id"].as_i64().unwrap(),
+        v["app_key"].as_str().unwrap().to_string(),
+        v["app_secret"].as_str().unwrap().to_string(),
+    )
+}
+
+async fn upload_bytes(
+    ctx: &TestCtx,
+    app_key: &str,
+    secret: &str,
+    user: &str,
+    data: &[u8],
+    query: &str,
+) -> (StatusCode, Value) {
+    json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(
+                app_key,
+                secret,
+                "POST",
+                "/v1/upload",
+                query,
+                data,
+                &[("x-user-id", user)],
+            ),
+        )
+        .await,
+    )
+    .await
+}
+
+async fn generate_link(ctx: &TestCtx, app_key: &str, secret: &str, file_id: i64, extra: Value) -> (StatusCode, Value) {
+    let mut body = json!({ "file_id": file_id });
+    if let Value::Object(m) = extra {
+        for (k, v) in m {
+            body[k] = v;
+        }
+    }
+    json_of(
+        send(
+            &ctx.public,
+            signed_req(app_key, secret, "POST", "/v1/links/generate", "", body, &[]),
+        )
+        .await,
+    )
+    .await
+}
+
+async fn download(ctx: &TestCtx, token: &str, headers: &[(&str, &str)]) -> (StatusCode, Bytes) {
+    let mut rb = Request::builder().method("GET").uri(format!("/v1/download/{token}"));
+    for (k, v) in headers {
+        rb = rb.header(*k, *v);
+    }
+    send(&ctx.public, rb.body(Body::empty()).unwrap()).await
+}
+
+// ---------------- Tests ----------------
+
+#[tokio::test]
+async fn admin_auth_required_and_create_app() {
+    let ctx = new_test_ctx();
+    let (s, _) = send(
+        &ctx.admin,
+        Request::builder()
+            .method("POST")
+            .uri("/admin/v1/apps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, _) = send(
+        &ctx.admin,
+        Request::builder()
+            .method("POST")
+            .uri("/admin/v1/apps")
+            .header("authorization", "Bearer wrong")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, v) = json_of(send(&ctx.admin, admin_req("POST", "/admin/v1/apps", json!({"name": "A"}))).await).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["app_secret"].as_str().unwrap().len() >= 32);
+    assert!(v["app_key"].as_str().unwrap().starts_with("app_"));
+
+    // Admin routes must NOT be reachable on the public router
+    let (s, _) = send(
+        &ctx.public,
+        Request::builder()
+            .method("GET")
+            .uri("/admin/v1/apps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn upload_download_embed_idempotent_revoke() {
+    let ctx = new_test_ctx();
+    let (_app_id, app_key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+
+    let (s, v) = upload_bytes(&ctx, &app_key, &secret, "u1", b"hello tenant", "").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let file_id = v["file_id"].as_i64().unwrap();
+    assert_eq!(v["owner"], json!("u1"));
+
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let token1 = v["token"].as_str().unwrap().to_string();
+    assert_eq!(v["reused"], json!(false));
+
+    // Idempotent within the fixed window: same token, reused=true, TTL NOT extended
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["token"], json!(token1));
+    assert_eq!(v["reused"], json!(true));
+
+    let (s, b) = download(&ctx, &token1, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"hello tenant"));
+
+    // Revoke -> immediately invalid
+    let (s, _) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&app_key, &secret, "POST", "/v1/tokens/revoke", "", json!({"token": token1}), &[]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = download(&ctx, &token1, &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Next generate mints a NEW token
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["reused"], json!(false));
+    let token2 = v["token"].as_str().unwrap().to_string();
+    assert_ne!(token1, token2);
+    let (s, _) = download(&ctx, &token2, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cross_tenant_isolation() {
+    let ctx = new_test_ctx();
+    let (_a1, key_a, secret_a) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (_a2, key_b, secret_b) = create_app_quota(&ctx.admin, "B", 1 << 20, 1 << 20).await;
+
+    let (s, v) = upload_bytes(&ctx, &key_a, &secret_a, "u_a", b"app-a-secret", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_a = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx, &key_a, &secret_a, file_a, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token_a = v["token"].as_str().unwrap().to_string();
+
+    // App B cannot generate a link for A's file (404 hides existence)
+    let (s, v) = generate_link(&ctx, &key_b, &secret_b, file_a, json!({})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+
+    // App B cannot read A's file meta
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key_b, &secret_b, "GET", &format!("/v1/files/{file_a}"), "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // App B sees an empty list (WHERE app_id = identity)
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key_b, &secret_b, "GET", "/v1/files", "", Value::Null, &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["files"].as_array().unwrap().len(), 0);
+
+    // A's token still works for A
+    let (s, b) = download(&ctx, &token_a, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"app-a-secret"));
+}
+
+#[tokio::test]
+async fn quota_enforced() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "Q", 100, 100).await;
+
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u1", b"0123456789", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u1", b"abcdefghij", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", &[b'x'; 90], "").await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"]["code"], json!("quota_exceeded"));
+
+    let (s, v) = json_of(
+        send(&ctx.admin, admin_req("GET", "/admin/v1/apps/1/usage", Value::Null)).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["usage_bytes"], json!(20));
+}
+
+#[tokio::test]
+async fn user_acl_and_folder_inheritance_deny_wins() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"file-of-u1", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let f1 = v["file_id"].as_i64().unwrap();
+    // register u2
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u2", b"x", "").await;
+    assert_eq!(s, StatusCode::OK);
+
+    // owner u1 can read
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u1", "GET", &format!("/v1/files/{f1}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::OK);
+    // u2 cannot
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f1}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // u2 cannot generate a link either
+    let (s, _) = json_of(
+        send(
+            &ctx.public,
+            jwt_req(&secret, app_id, "u2", "POST", "/v1/links/generate", json!({"file_id": f1})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Create folder, grant read to u2, upload a file inside
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", "/v1/folders", "", json!({"name": "invoices"}), &[]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let folder_id = v["folder_id"].as_i64().unwrap();
+
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"invoice-content", &format!("folder_id={folder_id}")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let f2 = v["file_id"].as_i64().unwrap();
+
+    // u2 cannot read yet (no ACL anywhere)
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // grant folder read to u2
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key,
+                &secret,
+                "PATCH",
+                &format!("/v1/folders/{folder_id}/acl"),
+                "",
+                json!({"action": "read", "add": ["u2"]}),
+                &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // u2 can now read f2 via folder inheritance
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::OK, "u2 should read via folder inheritance");
+
+    // deny wins: add deny u2 on the folder -> u2 locked out despite allow
+    let (s, _) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key,
+                &secret,
+                "PATCH",
+                &format!("/v1/folders/{folder_id}/acl"),
+                "",
+                json!({"action": "read", "add": [], "deny": ["u2"]}),
+                &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "inherited deny must win");
+}
+
+#[tokio::test]
+async fn inherited_folder_deny_beats_file_explicit_acl() {
+    // Regression for test report §5.1 (HIGH): a file-level explicit allow must
+    // NOT override a deny inherited from the folder chain ("档案盖不掉继承的 deny").
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u2", b"x", "").await;
+    assert_eq!(s, StatusCode::OK);
+
+    // folder with read u2 AND deny u2
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", "/v1/folders", "", json!({"name": "locked"}), &[]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let folder_id = v["folder_id"].as_i64().unwrap();
+    let (s, _) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key,
+                &secret,
+                "PATCH",
+                &format!("/v1/folders/{folder_id}/acl"),
+                "",
+                json!({"action": "read", "add": ["u2"], "deny": ["u2"]}),
+                &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // u1 uploads into the folder
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"confidential", &format!("folder_id={folder_id}")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let f2 = v["file_id"].as_i64().unwrap();
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "u2 denied before file-level grant");
+
+    // THE VULNERABILITY: file-level explicit allow for u2 must still be blocked
+    // by the inherited folder deny.
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key,
+                &secret,
+                "POST",
+                "/v1/files/batch/acl",
+                "",
+                json!({"file_ids": [f2], "action": "read", "add": ["u2"]}),
+                &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["updated"].as_i64().unwrap_or(0), 1);
+
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u2", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "file explicit ACL must not override inherited folder deny");
+
+    // owner u1 keeps access
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u1", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn replay_tamper_stale_denied() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let _ = app_id;
+
+    let make = |nonce: &str, sig: String, ts: String| {
+        Request::builder()
+            .method("GET")
+            .uri("/v1/files")
+            .header("x-app-key", &key)
+            .header("x-app-signature", sig)
+            .header("x-timestamp", ts)
+            .header("x-nonce", nonce)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let mk_sig = |ts: &str, nonce: &str| {
+        let bh = sha256(b"");
+        crypto::app_signature(
+            secret.as_bytes(),
+            &crypto::app_canonical("GET", "/v1/files", "", &bh, ts, nonce),
+        )
+    };
+
+    // first use with nonce N1 -> ok
+    let ts = Config::now().to_string();
+    let (s, _) = send(&ctx.public, make("rp-1", mk_sig(&ts, "rp-1"), ts.clone())).await;
+    assert_eq!(s, StatusCode::OK);
+    // replay same nonce -> 401
+    let (s, v) = json_of(send(&ctx.public, make("rp-1", mk_sig(&ts, "rp-1"), ts.clone())).await).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+    // tampered signature (fresh nonce, bad sig) -> 401
+    let (s, _) = send(&ctx.public, make("rp-2", "deadbeef".into(), ts.clone())).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // stale timestamp -> 401
+    let stale = (Config::now() - 10_000).to_string();
+    let (s, _) = send(&ctx.public, make("rp-3", mk_sig(&stale, "rp-3"), stale)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn range_and_etag() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"0123456789", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let (s, b) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"0123456789"));
+
+    let (s, b) = download(&ctx, &token, &[("range", "bytes=2-5")]).await;
+    assert_eq!(s, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(b, Bytes::from_static(b"2345"));
+
+    let (s, b) = download(&ctx, &token, &[("range", "bytes=-3")]).await;
+    assert_eq!(s, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(b, Bytes::from_static(b"789"));
+
+    let (s, _) = download(&ctx, &token, &[("range", "bytes=99-200")]).await;
+    assert_eq!(s, StatusCode::RANGE_NOT_SATISFIABLE);
+
+    let etag = format!("\"sha256-{}\"", sha256(b"0123456789"));
+    let (s, _) = download(&ctx, &token, &[("if-none-match", &etag)]).await;
+    assert_eq!(s, StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn persistence_across_reopen() {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let (public, admin, _) = build_app(cfg.clone()).unwrap();
+    let ctx1 = TestCtx {
+        _dir: TempDir::new().unwrap(),
+        cfg: cfg.clone(),
+        public,
+        admin,
+    };
+
+    let (app_id, key, secret) = create_app_quota(&ctx1.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx1, &key, &secret, "u1", b"persisted-content", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx1, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+    let _ = app_id;
+
+    // Reopen: brand-new process state, same DB + blob dir
+    let (public2, admin2, _) = build_app(cfg).unwrap();
+    let (s, b) = download(
+        &TestCtx {
+            _dir: TempDir::new().unwrap(),
+            cfg: ctx1.cfg.clone(),
+            public: public2.clone(),
+            admin: admin2.clone(),
+        },
+        &token,
+        &[],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "token must survive restart");
+    assert_eq!(b, Bytes::from_static(b"persisted-content"));
+
+    let (s, v) = json_of(
+        send(&public2, signed_req(&key, &secret, "GET", "/v1/files", "", Value::Null, &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["files"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn secret_rotation_invalidates_old() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "GET", "/v1/files", "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (s, v) = json_of(
+        send(&ctx.admin, admin_req("POST", "/admin/v1/apps/1/secret/rotate", Value::Null)).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let new_secret = v["app_secret"].as_str().unwrap().to_string();
+    assert_ne!(new_secret, secret);
+
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "GET", "/v1/files", "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &new_secret, "GET", "/v1/files", "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn forged_and_unregistered_user_jwt_denied() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u1", b"y", "").await;
+    assert_eq!(s, StatusCode::OK);
+
+    // JWT signed with wrong secret -> 401
+    let jwt_bad = crypto::jwt_encode(b"wrong-secret", &format!("app:{app_id}"), "u1", Config::now() + 3600);
+    let (s, _) = send(
+        &ctx.public,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/files")
+            .header("authorization", format!("Bearer {jwt_bad}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // JWT for unregistered user (correct secret) -> 401
+    let jwt_unknown = crypto::jwt_encode(secret.as_bytes(), &format!("app:{app_id}"), "u_ghost", Config::now() + 3600);
+    let (s, _) = send(
+        &ctx.public,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/files")
+            .header("authorization", format!("Bearer {jwt_unknown}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn delete_file_frees_usage_and_tokens() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"delete-me", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "DELETE", &format!("/v1/files/{file_id}"), "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let (s, _) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let (s, v) = json_of(send(&ctx.admin, admin_req("GET", "/admin/v1/apps/1/usage", Value::Null)).await).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["usage_bytes"], json!(0));
+}
+
+#[tokio::test]
+async fn batch_acl_app_level_only() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"f1", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let f1 = v["file_id"].as_i64().unwrap();
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"f2", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let f2 = v["file_id"].as_i64().unwrap();
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u3", b"z", "").await;
+    assert_eq!(s, StatusCode::OK);
+
+    // user JWT cannot batch
+    let (s, _) = send(
+        &ctx.public,
+        jwt_req(
+            &secret,
+            app_id,
+            "u1",
+            "POST",
+            "/v1/files/batch/acl",
+            json!({"file_ids": [f1], "action": "read", "add": ["u3"]}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // app-level batch works and is scoped to its own tenant
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key,
+                &secret,
+                "POST",
+                "/v1/files/batch/acl",
+                "",
+                json!({"file_ids": [f1, f2], "action": "read", "add": ["u3"]}),
+                &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["updated"], json!(2));
+
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u3", "GET", &format!("/v1/files/{f1}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(&ctx.public, jwt_req(&secret, app_id, "u3", "GET", &format!("/v1/files/{f2}"), Value::Null)).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn payload_limit_enforced() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "L", 1 << 20, 5).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"1234567890", "").await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+}
+
+#[tokio::test]
+async fn export_creates_tar() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u1", b"export-me", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let _ = app_id;
+
+    let (s, v) = json_of(
+        send(&ctx.public, signed_req(&key, &secret, "POST", "/v1/apps/export", "", Value::Null, &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let job_id = v["job_id"].as_i64().unwrap();
+
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (s, v) = json_of(
+            send(
+                &ctx.public,
+                signed_req(&key, &secret, "GET", &format!("/v1/apps/exports/{job_id}"), "", Value::Null, &[]),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        if v["status"] == json!("ready") {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "export job should become ready");
+
+    let (s, b) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "GET", &format!("/v1/apps/exports/{job_id}/download"), "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!b.is_empty());
+    assert!(b.windows(5).any(|w| w == b"ustar"), "should be a tar archive");
+}
+
+#[tokio::test]
+async fn share_token_with_ip_binding() {
+    // Trusted-proxy deployment: XFF is honored, IP binding works as designed.
+    let ctx = new_test_ctx_trust_xff();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"ip-bound", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let _ = app_id;
+
+    let (s, v) = generate_link(
+        &ctx,
+        &key,
+        &secret,
+        file_id,
+        json!({"scope": "share", "allowed_ip": "203.0.113.45"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let (s, b) = download(&ctx, &token, &[("x-forwarded-for", "203.0.113.45")]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"ip-bound"));
+
+    let (s, _) = download(&ctx, &token, &[("x-forwarded-for", "6.6.6.6")]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn xff_spoof_is_ignored_by_default() {
+    // Secure default (§5.2): the server does NOT trust X-Forwarded-For, so a
+    // client-sent header cannot satisfy an IP-bound share token.
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"ip-bound", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let _ = app_id;
+
+    let (s, v) = generate_link(
+        &ctx,
+        &key,
+        &secret,
+        file_id,
+        json!({"scope": "share", "allowed_ip": "203.0.113.45"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    // The spoofed header must NOT grant access: peer IP (empty here, no
+    // connect info in one-shot tests) does not match the bound IP.
+    let (s, _) = download(&ctx, &token, &[("x-forwarded-for", "203.0.113.45")]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn missing_signature_headers_rejected_before_streaming() {
+    // §5.3: an app-level upload that claims an app key but lacks the HMAC
+    // headers is rejected immediately — no body buffering happens.
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let _ = (key, secret);
+    let _ = app_id;
+    let (s, b) = send(
+        &ctx.public,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/upload")
+            .header("x-app-key", "missing")
+            .header("x-user-id", "u1")
+            .body(Body::from(Bytes::from_static(b"data")))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (_, v) = json_of((s, b)).await;
+    assert!(v["error"]["message"].as_str().unwrap().contains("Missing signature header"));
+}
+
+#[tokio::test]
+async fn healthz_and_admin_soft_delete() {
+    let ctx = new_test_ctx();
+    let (app_id, key, secret) = create_app_quota(&ctx.admin, "A", 1 << 20, 1 << 20).await;
+    let _ = app_id;
+
+    let (s, b) = send(
+        &ctx.public,
+        Request::builder().method("GET").uri("/healthz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, Bytes::from_static(b"OK"));
+
+    let (s, _) = send(&ctx.admin, admin_req("DELETE", "/admin/v1/apps/1", Value::Null)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = send(
+        &ctx.public,
+        signed_req(&key, &secret, "GET", "/v1/files", "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
