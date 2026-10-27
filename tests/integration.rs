@@ -1109,3 +1109,368 @@ async fn soft_delete_lifecycle_grace_then_purge() {
         .unwrap();
     assert_eq!(n, 0, "row physically purged");
 }
+
+// ---------------- API-layer: backup, chunked upload, rate limit, HEAD, zip, idempotency, TTL ----------------
+
+use std::sync::{Arc, Mutex};
+use tenant_fs_server::config::Ops;
+use tenant_fs_server::state::AppState;
+
+async fn send_full(
+    router: &Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, body)
+}
+
+/// Build a router pair on a temp DB with a hand-tuned rate-limit budget and
+/// backup root (env-driven defaults are not reachable from TestCtx).
+fn custom_routers(cfg: &Config, ops: Ops, rate_limit: u32) -> (Router, Router) {
+    let conn = db::open_db(&cfg.db_path).unwrap();
+    db::migrate(&conn).unwrap();
+    let db: db::Db = Arc::new(Mutex::new(conn));
+    let state = AppState {
+        cfg: cfg.clone(),
+        ops,
+        db,
+        ratelimit: Arc::new(tenant_fs_server::ratelimit::RateLimiter::new(rate_limit, 1000)),
+        idem: Arc::new(tenant_fs_server::idem::IdemStore::new(3600, 1000)),
+    };
+    (
+        tenant_fs_server::routes::public_router(state.clone()),
+        tenant_fs_server::routes::admin_router(state),
+    )
+}
+
+fn test_ops(dir: &TempDir) -> Ops {
+    Ops {
+        backup_root: dir.path().join("backups"),
+        backup_retention: 7,
+        backup_schedule_secs: 0,
+        chunk_ttl_secs: 3600,
+        rate_limit_per_min: 120,
+        rate_limit_max_entries: 10000,
+        idem_window_secs: 3600,
+        idem_max_entries: 10000,
+        export_ttl_secs: 86400,
+    }
+}
+
+#[tokio::test]
+async fn chunked_upload_flow_and_unauth_rejected() {
+    let ctx = new_test_ctx();
+    let (_, key, secret) = create_app_quota(&ctx.admin, "cu", 1 << 20, 1 << 20).await;
+
+    // init
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", "/v1/upload/init", "", json!({"total_size": 11}), &[("x-user-id", "u1")]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "init: {v}");
+    let up_id = v["upload_id"].as_str().unwrap().to_string();
+    assert!(up_id.len() >= 32, "upload_id must be long random");
+
+    // chunk 1 (5 bytes) at offset 0
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(&key, &secret, "PUT", &format!("/v1/upload/{up_id}"), "", b"hello", &[("x-chunk-offset", "0")]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "chunk1: {v}");
+    assert_eq!(v["received_size"], json!(5));
+
+    // chunk 2 (6 bytes) at offset 5
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(&key, &secret, "PUT", &format!("/v1/upload/{up_id}"), "", b" world", &[("x-chunk-offset", "5")]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "chunk2: {v}");
+    assert_eq!(v["received_size"], json!(11));
+
+    // out-of-order chunk rejected with resume hint
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(&key, &secret, "PUT", &format!("/v1/upload/{up_id}"), "", b"ZZ", &[("x-chunk-offset", "9")]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "gap: {v}");
+
+    // finalize
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", &format!("/v1/upload/{up_id}/finalize"), "", Value::Null, &[("x-user-id", "u1")]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "finalize: {v}");
+    assert_eq!(v["size"], json!(11));
+    assert_eq!(v["sha256"], json!(sha256(b"hello world")));
+
+    // roundtrip content matches (encrypted through storage layer)
+    let file_id = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "gen: {v}");
+    let token = v["token"].as_str().unwrap().to_string();
+    let (s, body) = download(&ctx, &token, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(&body[..], b"hello world");
+
+    // unauthenticated chunk upload rejected before streaming
+    let (s, _) = send(
+        &ctx.public,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/upload/{up_id}"))
+            .header("x-chunk-offset", "11")
+            .body(Body::from("x"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn head_download_headers_and_404() {
+    let ctx = new_test_ctx();
+    let (_, key, secret) = create_app_quota(&ctx.admin, "hd", 1 << 20, 1 << 20).await;
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"head-body-12345", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let file_id = v["file_id"].as_i64().unwrap();
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    // HEAD: 200 + Content-Length + empty body
+    let (s, headers, body) = send_full(
+        &ctx.public,
+        Request::builder()
+            .method("HEAD")
+            .uri(format!("/v1/download/{token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(headers.get("content-length").unwrap().to_str().unwrap(), "15");
+    assert!(body.is_empty(), "HEAD must have no body");
+
+    // unknown token HEAD -> 404 (same semantics as GET)
+    let (s, _, _) = send_full(
+        &ctx.public,
+        Request::builder()
+            .method("HEAD")
+            .uri("/v1/download/nope")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn zip_export_organized_by_user() {
+    let ctx = new_test_ctx();
+    let (_, key, secret) = create_app_quota(&ctx.admin, "ze", 1 << 20, 1 << 20).await;
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u1", b"AAA", "").await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = upload_bytes(&ctx, &key, &secret, "u2", b"BBBB", "").await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", "/v1/apps/export", "", json!({"format": "zip"}), &[]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "export: {v}");
+    let job_id = v["job_id"].as_i64().unwrap();
+
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (s, v) = json_of(
+            send(&ctx.public, signed_req(&key, &secret, "GET", &format!("/v1/apps/exports/{job_id}"), "", Value::Null, &[])).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        if v["status"] == json!("ready") {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready);
+
+    let (s, headers, body) = send_full(
+        &ctx.public,
+        signed_req(&key, &secret, "GET", &format!("/v1/apps/exports/{job_id}/download"), "", Value::Null, &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("zip"));
+
+    // entries organized per user
+    use zip::read::ZipArchive;
+    let mut za = ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    let names: Vec<String> = (0..za.len()).map(|i| za.by_index(i).unwrap().name().to_string()).collect();
+    assert!(names.iter().any(|n| n.starts_with("files/u1/")), "u1 missing: {names:?}");
+    assert!(names.iter().any(|n| n.starts_with("files/u2/")), "u2 missing: {names:?}");
+}
+
+#[tokio::test]
+async fn idempotency_key_returns_same_result() {
+    let ctx = new_test_ctx();
+    let (_, key, secret) = create_app_quota(&ctx.admin, "idem", 1 << 20, 1 << 20).await;
+
+    let r1 = signed_req_raw(&key, &secret, "POST", "/v1/upload", "", b"IDEM-BODY", &[("x-user-id", "u1"), ("idempotency-key", "key-1")]);
+    let (s, v1) = json_of(send(&ctx.public, r1).await).await;
+    assert_eq!(s, StatusCode::OK, "first: {v1}");
+
+    let r2 = signed_req_raw(&key, &secret, "POST", "/v1/upload", "", b"IDEM-BODY", &[("x-user-id", "u1"), ("idempotency-key", "key-1")]);
+    let (s, v2) = json_of(send(&ctx.public, r2).await).await;
+    assert_eq!(s, StatusCode::OK, "retry: {v2}");
+    assert_eq!(v1["file_id"], v2["file_id"], "same idempotent result");
+
+    // only one row persisted for this app
+    let conn = ctx.db.lock().unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE user_id='u1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "retry must not create a second file");
+}
+
+#[tokio::test]
+async fn rate_limit_429_carries_retry_after() {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let ops = test_ops(&dir);
+    let (public, admin) = custom_routers(&cfg, ops, 1); // single request per window
+    let (_, key, secret) = create_app_quota(&admin, "rl", 1 << 20, 1 << 20).await;
+
+    // first request consumes the single slot (fails validation, but passes the gate)
+    let (s, _, _) = send_full(
+        &public,
+        signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": 1}), &[]),
+    )
+    .await;
+    assert!(s != StatusCode::TOO_MANY_REQUESTS, "first call must not be limited: {s}");
+
+    // second request: 429 + Retry-After
+    let (s, headers, body) = send_full(
+        &public,
+        signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": 1}), &[]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = headers.get("retry-after").unwrap().to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&retry));
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"]["code"], json!("rate_limited"));
+}
+
+#[tokio::test]
+async fn backup_admin_api_run_list_detail_config() {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let ops = test_ops(&dir);
+    let (public, admin) = custom_routers(&cfg, ops, 1000);
+    let (_, key, secret) = create_app_quota(&admin, "bk", 1 << 20, 1 << 20).await;
+    let (s, _) = json_of(
+        send(&public, signed_req_raw(&key, &secret, "POST", "/v1/upload", "", b"blob-1", &[("x-user-id", "u1")])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // run
+    let (s, v) = json_of(send(&admin, admin_req("POST", "/admin/v1/backups/run", Value::Null)).await).await;
+    assert_eq!(s, StatusCode::OK, "run: {v}");
+    assert_eq!(v["status"], json!("ready"));
+    assert!(v["size"].as_i64().unwrap() > 0);
+    let files = v["files"].as_array().unwrap();
+    assert!(files.iter().any(|f| f["name"] == json!("db.sqlite")));
+    assert!(files.iter().any(|f| f["name"] == json!("blobs.tar")));
+    let sha = files.iter().find(|f| f["name"] == json!("blobs.tar")).unwrap()["sha256"].as_str().unwrap().to_string();
+    let backup_dir = dir.path().join("backups/default").join(v["backup_id"].as_str().unwrap());
+
+    // manifest sha256 matches the on-disk artifact (dir named by random id)
+    let on_disk = std::fs::read(backup_dir.join("blobs.tar")).unwrap();
+    assert_eq!(sha256(&on_disk), sha);
+
+    // list
+    let (s, v) = json_of(send(&admin, admin_req("GET", "/admin/v1/backups", Value::Null)).await).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["backups"].as_array().unwrap().len(), 1);
+
+    // detail (manifest parsed)
+    let (s, v) = json_of(send(&admin, admin_req("GET", "/admin/v1/backups/1", Value::Null)).await).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["manifest"].is_object(), "detail: {v}");
+
+    // unknown id -> 404 hidden
+    let (s, _) = send(&admin, admin_req("GET", "/admin/v1/backups/9999", Value::Null)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // config PATCH
+    let (s, v) = json_of(
+        send(&admin, admin_req("PATCH", "/admin/v1/backups/config", json!({"retention": 3, "target": "t1", "schedule": 0}))).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "config: {v}");
+    assert_eq!(v["retention"], json!(3));
+    assert_eq!(v["target"], json!("t1"));
+
+    // path escape rejected
+    let (s, _) = send(&admin, admin_req("PATCH", "/admin/v1/backups/config", json!({"target": "../esc"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // backup artifacts contain no key material (server secret)
+    let tar = std::fs::read(backup_dir.join("blobs.tar")).unwrap();
+    assert!(!tar.windows(b"test-server-secret".len()).any(|w| w == b"test-server-secret"));
+}
+
+#[tokio::test]
+async fn export_ttl_and_upload_job_prune() {
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let conn = db::open_db(&cfg.db_path).unwrap();
+    db::migrate(&conn).unwrap();
+    let now = Config::now();
+
+    conn.execute(
+        "INSERT INTO export_jobs(app_id,status,created_at,done_at,size,path) VALUES(1,'ready',?1,?2,5,'/tmp/ttl.tar')",
+        [now - 200, now - 200],
+    )
+    .unwrap();
+    let stale = db::prune_expired_exports(&conn, now - 100).unwrap();
+    assert_eq!(stale, vec!["/tmp/ttl.tar".to_string()]);
+
+    conn.execute(
+        "INSERT INTO upload_jobs(upload_id,app_id,user_id,total_size,received_size,status,path,created_at,expires_at)
+         VALUES('up_x',1,'u1',10,0,'open','/tmp/up.part',?1,?2)",
+        [now, now - 1],
+    )
+    .unwrap();
+    let partials = db::prune_expired_uploads(&conn, now).unwrap();
+    assert_eq!(partials, vec!["/tmp/up.part".to_string()]);
+}

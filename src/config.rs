@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// TENANT_FS_SERVER_SECRET explicitly (see §5.6 of the test report).
 pub const DEFAULT_SERVER_SECRET: &str = "dev-server-secret-change-me";
 
+/// Development-only default admin token; production deployments must set
+/// TENANT_FS_ADMIN_TOKEN explicitly.
+pub const DEFAULT_ADMIN_TOKEN: &str = "dev-admin-token";
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub db_path: PathBuf,
@@ -34,6 +38,40 @@ pub struct Config {
     pub purge_interval_secs: u64,
 }
 
+/// Operational knobs that were added with the API layer (backup, chunked
+/// upload, rate limiting, idempotency, export TTL). Kept in a separate struct
+/// so the storage-layer test fixtures (which build `Config` literally) are
+/// untouched. All values have safe defaults; every knob is overridable via
+/// environment variable.
+#[derive(Clone, Debug)]
+pub struct Ops {
+    /// Root directory backups are written under. Any configured backup target
+    /// must canonicalize inside this root (defense against path/symlink escape).
+    pub backup_root: PathBuf,
+    /// Number of backup copies to retain (newest win); older ones are deleted.
+    pub backup_retention: usize,
+    /// Automatic scheduled-backup interval in seconds (0 = no scheduled run;
+    /// the maintenance loop still honors a per-deployment override stored in
+    /// the `backup_settings` DB table via PATCH /admin/v1/backups/config).
+    pub backup_schedule_secs: u64,
+    /// In-flight chunked uploads expire after this many seconds and are
+    /// swept (staged partial files unlinked).
+    pub chunk_ttl_secs: i64,
+    /// Per-app request budget per 60s window, shared by generate/upload/export
+    /// and chunked-upload calls. 0 = disabled.
+    pub rate_limit_per_min: u32,
+    /// Hard capacity of the in-memory rate-limit map (anti memory-bomb).
+    pub rate_limit_max_entries: usize,
+    /// Idempotency-Key cache window: a cached upload result is reused within
+    /// this many seconds; after the window the key behaves as a new upload.
+    pub idem_window_secs: i64,
+    /// Hard capacity of the idempotency cache.
+    pub idem_max_entries: usize,
+    /// Export artifacts (tar/zip) and their rows are swept this many seconds
+    /// after the job finished.
+    pub export_ttl_secs: i64,
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -44,7 +82,7 @@ impl Config {
             db_path: PathBuf::from(env_or("TENANT_FS_DB", "data/fs.db")),
             blob_root: PathBuf::from(env_or("TENANT_FS_BLOBS", "data/blobs")),
             admin_token: std::env::var("TENANT_FS_ADMIN_TOKEN")
-                .unwrap_or_else(|_| "dev-admin-token".to_string()),
+                .unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string()),
             server_secret: std::env::var("TENANT_FS_SERVER_SECRET")
                 .unwrap_or_else(|_| DEFAULT_SERVER_SECRET.to_string()),
             public_bind: env_or("TENANT_FS_PUBLIC_BIND", "0.0.0.0:8080"),
@@ -81,5 +119,42 @@ impl Config {
 
     pub fn now() -> i64 {
         chrono::Utc::now().timestamp()
+    }
+}
+
+impl Ops {
+    pub fn from_env() -> Self {
+        Ops {
+            backup_root: PathBuf::from(env_or("TENANT_FS_BACKUP_ROOT", "data/backups")),
+            backup_retention: env_or("TENANT_FS_BACKUP_RETENTION", "7")
+                .parse::<usize>()
+                .unwrap_or(7)
+                .clamp(1, 1000),
+            backup_schedule_secs: env_or("TENANT_FS_BACKUP_SCHEDULE_SECS", "0")
+                .parse::<u64>()
+                .unwrap_or(0),
+            chunk_ttl_secs: env_or("TENANT_FS_UPLOAD_TTL_SECS", "86400")
+                .parse::<i64>()
+                .unwrap_or(86400)
+                .max(60),
+            rate_limit_per_min: env_or("TENANT_FS_RATE_LIMIT_PER_MIN", "120")
+                .parse::<u32>()
+                .unwrap_or(120),
+            rate_limit_max_entries: env_or("TENANT_FS_RATE_LIMIT_MAX_ENTRIES", "10000")
+                .parse::<usize>()
+                .unwrap_or(10000),
+            idem_window_secs: env_or("TENANT_FS_IDEMPOTENCY_WINDOW_SECS", "3600")
+                .parse::<i64>()
+                .unwrap_or(3600)
+                .max(60),
+            idem_max_entries: env_or("TENANT_FS_IDEMPOTENCY_MAX_ENTRIES", "10000")
+                .parse::<usize>()
+                .unwrap_or(10000),
+            // Floor of 1s only guards against 0/negative; E2E uses a short TTL.
+            export_ttl_secs: env_or("TENANT_FS_EXPORT_TTL_SECS", "86400")
+                .parse::<i64>()
+                .unwrap_or(86400)
+                .max(1),
+        }
     }
 }

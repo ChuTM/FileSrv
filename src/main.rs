@@ -1,12 +1,14 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use tenant_fs_server::config::Ops;
 use tenant_fs_server::db;
 use tenant_fs_server::{build_app, Config};
 
 #[tokio::main]
 async fn main() {
     let cfg = Config::from_env();
+    let ops = Ops::from_env();
     // Warn loudly when the default server secret (which decrypts every app
     // secret) is left in place (test report §5.6).
     if cfg.server_secret == tenant_fs_server::DEFAULT_SERVER_SECRET {
@@ -15,6 +17,15 @@ async fn main() {
              ('{DEFAULT}'). Do not deploy with this value; app secrets are \
              encrypted with it.",
             DEFAULT = tenant_fs_server::DEFAULT_SERVER_SECRET
+        );
+    }
+    // Warn loudly when the default admin token is left in place too.
+    if cfg.admin_token == tenant_fs_server::config::DEFAULT_ADMIN_TOKEN {
+        eprintln!(
+            "WARNING: TENANT_FS_ADMIN_TOKEN is set to the development default \
+             ('{DEFAULT}'). Do not deploy with this value; it grants full \
+             admin access on the admin interface.",
+            DEFAULT = tenant_fs_server::config::DEFAULT_ADMIN_TOKEN
         );
     }
     let (public, admin, db_handle) = build_app(cfg.clone()).expect("failed to initialize server");
@@ -48,19 +59,43 @@ async fn main() {
     let retention = cfg.audit_retention_secs;
     let grace = cfg.soft_delete_grace_secs;
     let maintenance_cfg = cfg.clone();
+    let maintenance_ops = ops.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(maintenance_cfg.purge_interval_secs));
         loop {
             interval.tick().await;
-            let expired = {
+            let (expired, export_paths, upload_paths) = {
                 let conn = match prune_db.lock() {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+                let now = tenant_fs_server::Config::now();
                 let _ = db::prune_nonces(&conn, 3600);
                 let _ = db::prune_audit(&conn, retention);
-                let cutoff = tenant_fs_server::Config::now() - grace;
-                db::purge_expired_tombstones(&conn, cutoff).unwrap_or_default()
+                let _ = db::prune_expired_tokens(&conn);
+                let cutoff = now - grace;
+                let expired = db::purge_expired_tombstones(&conn, cutoff).unwrap_or_default();
+                // Export artifacts (tar/zip) and their rows past TTL.
+                let export_paths = db::prune_expired_exports(&conn, now - maintenance_ops.export_ttl_secs)
+                    .unwrap_or_default();
+                // Interrupted chunked-upload sessions past their TTL.
+                let upload_paths = db::prune_expired_uploads(&conn, now).unwrap_or_default();
+
+                // Scheduled backups: if the operator set a schedule through
+                // PATCH /admin/v1/backups/config (env default 0 = off), fire a
+                // run when the interval has elapsed since the last backup.
+                let settings = tenant_fs_server::backup::effective_settings(&conn, &maintenance_ops);
+                if settings.schedule_secs > 0 {
+                    let last = db::latest_backup_time(&conn).ok().flatten();
+                    let due = match last {
+                        Some(ts) => now - ts >= settings.schedule_secs as i64,
+                        None => true,
+                    };
+                    if due {
+                        let _ = tenant_fs_server::backup::run_backup(&maintenance_cfg, &maintenance_ops, &conn);
+                    }
+                }
+                (expired, export_paths, upload_paths)
             };
             // DB row unlinked; now unlink the blob files outside the DB lock.
             for t in expired {
@@ -70,6 +105,12 @@ async fn main() {
                     &t.storage_uuid,
                     t.blob_path.as_deref(),
                 );
+            }
+            for p in export_paths {
+                let _ = std::fs::remove_file(&p);
+            }
+            for p in upload_paths {
+                let _ = std::fs::remove_file(&p);
             }
         }
     });

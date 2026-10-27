@@ -15,41 +15,86 @@ pub async fn download(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
     if token.is_empty() {
         return Err(ApiError::bad_request("Token is required."));
     }
-    // Client IP for IP-bound share tokens: socket peer by default; the
-    // X-Forwarded-For header is only consulted in trusted-proxy mode (test
-    // report §5.2), otherwise a spoofed header has no effect.
-    let ip = {
-        let peer = crate::routes::peer_ip_of(&req);
-        if st.cfg.trust_xff {
-            req.headers()
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-                .unwrap_or(peer)
-        } else {
-            peer
-        }
-    };
-
-    // Capability check: valid, unexpired, unrevoked token (+ IP binding).
-    let grant = tokens::verify(&st.db, &token, &ip)
-        .ok_or_else(|| ApiError::not_found("Token not found or expired."))?;
-
-    let (file, path) = {
-        let conn = st.db.lock().unwrap();
-        let file = db::file_by_id(&conn, grant.file_id)?
-            .filter(|f| f.app_id == grant.app_id && f.deleted_at.is_none())
-            .ok_or_else(|| ApiError::not_found("File not found."))?;
-        let app = db::app_by_id(&conn, grant.app_id)?;
-        if !app.map(|a| a.enabled && a.deleted_at.is_none()).unwrap_or(false) {
-            return Err(ApiError::not_found("File not found."));
-        }
-        let p = storage::resolve_blob(&st.cfg, grant.app_id, &file.storage_uuid, file.blob_path.as_deref())
-            .map_err(|_| ApiError::not_found("File content missing."))?;
-        (file, p)
-    };
-
+    let ip = client_ip(&st, &req);
+    let (file, path) = resolve_download(&st, &token, &ip).await?;
     serve_file(&file, &path, req.headers()).await
+}
+
+/// HEAD /v1/download/:token — identical auth and 404 semantics as GET, but
+/// response headers only (no body). Implemented explicitly rather than relying
+/// on the framework stripping a GET body.
+pub async fn download_head(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let uri = req.uri();
+    let token = uri.path().split('/').nth(3).unwrap_or("").to_string();
+    if token.is_empty() {
+        return Err(ApiError::bad_request("Token is required."));
+    }
+    let ip = client_ip(&st, &req);
+    let (file, _path) = resolve_download(&st, &token, &ip).await?;
+    let size = file.size.max(0) as u64;
+    let etag = format!("\"sha256-{}\"", file.sha256);
+
+    // Conditional HEAD: If-None-Match -> 304 (same as GET).
+    if let Some(inm) = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+        if inm.trim() == etag {
+            return Ok(Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, &etag)
+                .body(Body::empty())
+                .unwrap());
+        }
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ETAG, &etag)
+        .header(header::CACHE_CONTROL, "private, max-age=1500")
+        .header(header::CONTENT_TYPE, &file.content_type)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", file.storage_uuid),
+        )
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// Client IP for IP-bound tokens: socket peer by default; X-Forwarded-For only
+/// in trusted-proxy mode (test report §5.2).
+fn client_ip(st: &AppState, req: &Request<Body>) -> String {
+    let peer = crate::routes::peer_ip_of(req);
+    if st.cfg.trust_xff {
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+            .unwrap_or(peer)
+    } else {
+        peer
+    }
+}
+
+/// Shared capability + file resolution for GET and HEAD.
+async fn resolve_download(
+    st: &AppState,
+    token: &str,
+    ip: &str,
+) -> Result<(db::FileRow, std::path::PathBuf), ApiError> {
+    // Capability check: valid, unexpired, unrevoked token (+ IP binding).
+    let grant = tokens::verify(&st.db, token, ip)
+        .ok_or_else(|| ApiError::not_found("Token not found or expired."))?;
+    let conn = st.db.lock().unwrap();
+    let file = db::file_by_id(&conn, grant.file_id)?
+        .filter(|f| f.app_id == grant.app_id && f.deleted_at.is_none())
+        .ok_or_else(|| ApiError::not_found("File not found."))?;
+    let app = db::app_by_id(&conn, grant.app_id)?;
+    if !app.map(|a| a.enabled && a.deleted_at.is_none()).unwrap_or(false) {
+        return Err(ApiError::not_found("File not found."));
+    }
+    let p = storage::resolve_blob(&st.cfg, grant.app_id, &file.storage_uuid, file.blob_path.as_deref())
+        .map_err(|_| ApiError::not_found("File content missing."))?;
+    Ok((file, p))
 }
 
 fn parse_range(spec: &str, size: u64) -> Option<(u64, u64)> {

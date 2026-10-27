@@ -1,13 +1,17 @@
 pub mod auth;
 pub mod authz;
+pub mod backup;
 pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod idem;
+pub mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod storage;
 pub mod tokens;
+pub mod upload;
 
 pub use config::{Config, DEFAULT_SERVER_SECRET};
 pub use routes::{admin_router, public_router};

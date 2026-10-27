@@ -159,7 +159,16 @@ pub fn public_router(state: AppState) -> Router {
             "/v1/apps/exports/{id}/download",
             axum::routing::get(app::export_download),
         )
-        .route("/v1/download/{token}", axum::routing::get(download::download))
+        .route("/v1/upload/init", axum::routing::post(app::upload_init))
+        .route("/v1/upload/{upload_id}", axum::routing::put(app::upload_chunk))
+        .route(
+            "/v1/upload/{upload_id}/finalize",
+            axum::routing::post(app::upload_finalize),
+        )
+        .route(
+            "/v1/download/{token}",
+            axum::routing::get(download::download).head(download::download_head),
+        )
         .with_state(state)
 }
 
@@ -178,5 +187,12 @@ pub fn admin_router(state: AppState) -> Router {
         )
         .route("/admin/v1/apps/{id}/usage", axum::routing::get(admin::app_usage))
         .route("/admin/v1/audit", axum::routing::get(admin::list_audit))
+        .route("/admin/v1/backups/run", axum::routing::post(admin::backup_run))
+        .route("/admin/v1/backups", axum::routing::get(admin::backup_list))
+        .route("/admin/v1/backups/{id}", axum::routing::get(admin::backup_detail))
+        .route(
+            "/admin/v1/backups/config",
+            axum::routing::patch(admin::backup_config),
+        )
         .with_state(state)
 }

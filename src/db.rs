@@ -107,6 +107,42 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           size INTEGER,
           path TEXT
         );
+
+        -- Chunked / resumable upload sessions (API layer). The staged partial
+        -- blob lives at `path`; rows expire (and are swept) after chunk_ttl.
+        CREATE TABLE IF NOT EXISTS upload_jobs(
+          upload_id TEXT PRIMARY KEY,
+          app_id INTEGER NOT NULL,
+          user_id TEXT NOT NULL,
+          folder_id INTEGER,
+          total_size INTEGER,
+          received_size INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+
+        -- Operational settings (backup schedule/target/retention) that the
+        -- operator can toggle at runtime via PATCH /admin/v1/backups/config.
+        CREATE TABLE IF NOT EXISTS backup_settings(
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        -- Backup artifact metadata (the artifacts themselves live on disk
+        -- under the configured backup root; no key material is ever stored).
+        CREATE TABLE IF NOT EXISTS backups(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          backup_id TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          size INTEGER,
+          target_path TEXT,
+          manifest TEXT,
+          error TEXT
+        );
         "#,
     )
 }
@@ -328,6 +364,158 @@ pub fn purge_expired_tombstones(conn: &Connection, cutoff: i64) -> rusqlite::Res
     conn.execute(
         "DELETE FROM folders WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
         params![cutoff],
+    )?;
+    Ok(rows)
+}
+
+// ---------------- Runtime settings (backup config) ----------------
+
+pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM backup_settings WHERE key=?1", params![key], |r| r.get(0))
+        .ok()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO backup_settings(key,value) VALUES(?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=?2",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+// ---------------- Backup records ----------------
+
+pub struct BackupRow {
+    pub id: i64,
+    pub backup_id: String,
+    pub status: String,
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+    pub size: Option<i64>,
+    pub target_path: Option<String>,
+    pub manifest: Option<String>,
+    pub error: Option<String>,
+}
+
+fn backup_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackupRow> {
+    Ok(BackupRow {
+        id: row.get(0)?,
+        backup_id: row.get(1)?,
+        status: row.get(2)?,
+        created_at: row.get(3)?,
+        finished_at: row.get(4)?,
+        size: row.get(5)?,
+        target_path: row.get(6)?,
+        manifest: row.get(7)?,
+        error: row.get(8)?,
+    })
+}
+
+pub fn insert_backup(conn: &Connection, backup_id: &str, created_at: i64) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO backups(backup_id,status,created_at) VALUES(?1,'running',?2)",
+        params![backup_id, created_at],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn finish_backup(
+    conn: &Connection,
+    id: i64,
+    status: &str,
+    size: Option<i64>,
+    target_path: Option<&str>,
+    manifest: Option<&str>,
+    error: Option<&str>,
+    finished_at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE backups SET status=?1, size=?2, target_path=?3, manifest=?4, error=?5, finished_at=?6
+         WHERE id=?7",
+        params![status, size, target_path, manifest, error, finished_at, id],
+    )?;
+    Ok(())
+}
+
+const BACKUP_COLS: &str =
+    "id,backup_id,status,created_at,finished_at,size,target_path,manifest,error";
+
+pub fn list_backups(conn: &Connection) -> rusqlite::Result<Vec<BackupRow>> {
+    let mut stmt = conn.prepare(&format!("SELECT {BACKUP_COLS} FROM backups ORDER BY id DESC"))?;
+    let rows = stmt.query_map(params![], backup_row_from)?;
+    rows.collect()
+}
+
+pub fn backup_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<BackupRow>> {
+    let mut stmt = conn.prepare(&format!("SELECT {BACKUP_COLS} FROM backups WHERE id=?1"))?;
+    let mut rows = stmt.query_map(params![id], backup_row_from)?;
+    rows.next().transpose()
+}
+
+pub fn latest_backup_time(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row("SELECT MAX(created_at) FROM backups", [], |r| r.get(0))
+}
+
+/// Return the (id, backup_id, target_path) of backups beyond the newest
+/// `keep` copies (caller unlinks their on-disk dirs and deletes the rows).
+pub fn obsolete_backups(conn: &Connection, keep: usize) -> rusqlite::Result<Vec<(i64, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,backup_id,target_path FROM backups ORDER BY id DESC LIMIT -1 OFFSET ?1",
+    )?;
+    let rows = stmt.query_map(params![keep.max(1) as i64], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    rows.collect()
+}
+
+pub fn delete_backup_row(conn: &Connection, id: i64) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM backups WHERE id=?1", params![id])
+}
+
+// ---------------- Background sweeps ----------------
+
+/// Drop expired (and revoked) capability token rows. Tokens are checked on
+/// every use anyway; this just keeps the table from growing without bound.
+pub fn prune_expired_tokens(conn: &Connection) -> rusqlite::Result<usize> {
+    let now = Config::now();
+    conn.execute(
+        "DELETE FROM tokens WHERE expires_at < ?1 OR revoked=1",
+        params![now],
+    )
+}
+
+/// Drop finished export jobs whose artifact is older than `cutoff`; return
+/// the artifact paths so the caller can unlink them outside the DB lock.
+pub fn prune_expired_exports(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<String>> {
+    let rows: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT path FROM export_jobs WHERE done_at IS NOT NULL AND done_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    conn.execute(
+        "DELETE FROM export_jobs WHERE done_at IS NOT NULL AND done_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(rows)
+}
+
+/// Drop unfinished chunked-upload sessions past their expiry; return the
+/// staged partial paths so the caller can unlink them.
+pub fn prune_expired_uploads(conn: &Connection, now: i64) -> rusqlite::Result<Vec<String>> {
+    let rows: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT path FROM upload_jobs WHERE status != 'finalized' AND expires_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![now], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    conn.execute(
+        "DELETE FROM upload_jobs WHERE status != 'finalized' AND expires_at < ?1",
+        params![now],
     )?;
     Ok(rows)
 }

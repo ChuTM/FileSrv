@@ -18,6 +18,13 @@ For PART 9 the server must additionally run with the soft-delete test knobs:
                                         # on the next maintenance tick
   TENANT_FS_PURGE_INTERVAL_SECS=3      # maintenance loop every 3s
   TENANT_FS_ENCRYPT_BLOBS=true          # (default) envelope encryption at rest
+
+For PART 10 the server must additionally run with:
+  TENANT_FS_BACKUP_ROOT=<dir>/backups  # backup artifacts root (also used to
+                                        # verify the manifest sha256 on disk)
+  TENANT_FS_EXPORT_TTL_SECS=12         # short TTL so the export sweep is visible
+  TENANT_FS_RATE_LIMIT_PER_MIN=100     # low enough to trigger 429 quickly, high
+                                        # enough for the rest of the suite
 """
 import hashlib, hmac, http.client, json, os, random, string, sys, time, urllib.parse, uuid, base64, sqlite3
 
@@ -429,6 +436,130 @@ try:
 except Exception as e:
     print(f"  (sqlite probe failed: {e})")
 check("purge removes DB tombstone row", n == 0, f"count={n}")
+
+print()
+print("=" * 60)
+print("PART 10: backup API / chunked upload / rate limit / HEAD / zip / idempotency / export TTL")
+print("=" * 60)
+
+# --- 10.1 backup: run + list + detail + config + manifest sha256 ---
+s, v, _ = json_body(admin_req("POST", "/admin/v1/backups/run"))
+check("backup run -> ready", s == 200 and v.get("status") == "ready" and v.get("size", 0) > 0, f"got {s} {v}")
+BK_ID = v.get("backup_id")
+BK_FILES = {f["name"]: f for f in v.get("files", [])} if isinstance(v, dict) else {}
+check("backup manifest lists db.sqlite + blobs.tar with sha256", set(BK_FILES) == {"db.sqlite", "blobs.tar"} and all(len(f.get("sha256", "")) == 64 for f in BK_FILES.values()), f"{BK_FILES}")
+
+# verify manifest sha256 against the real artifact on disk
+BACKUP_ROOT = os.environ.get("TENANT_FS_BACKUP_ROOT", "data/backups")
+manifest_ok = False
+try:
+    on_disk = open(os.path.join(BACKUP_ROOT, "default", BK_ID, "blobs.tar"), "rb").read()
+    manifest_ok = sha256_hex(on_disk) == BK_FILES.get("blobs.tar", {}).get("sha256")
+except Exception as e:
+    print(f"  (manifest check failed to read artifact: {e})")
+check("manifest sha256 matches on-disk blobs.tar", manifest_ok)
+
+s, v, _ = json_body(admin_req("GET", "/admin/v1/backups"))
+check("backup list -> contains run", s == 200 and any(b.get("backup_id") == BK_ID for b in v.get("backups", [])), f"{v}")
+s, v, _ = json_body(admin_req("GET", "/admin/v1/backups/1"))
+check("backup detail -> manifest object", s == 200 and isinstance(v.get("manifest"), dict), f"{v}")
+s, _, _ = admin_req("GET", "/admin/v1/backups/99999")
+check("unknown backup id -> 404 (hidden)", s == 404, f"got {s}")
+s, v, _ = json_body(admin_req("PATCH", "/admin/v1/backups/config", {"retention": 5, "target": "e2e", "schedule": 0}))
+check("backup config PATCH -> stored", s == 200 and v.get("retention") == 5 and v.get("target") == "e2e", f"{v}")
+s, v, _ = json_body(admin_req("PATCH", "/admin/v1/backups/config", {"target": "../escape"}))
+check("backup target path escape -> 400", s == 400, f"got {s}")
+
+# --- 10.2 chunked / resumable upload ---
+CHUNK = b"chunked-" + os.urandom(16)
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/upload/init", obj={"total_size": len(CHUNK)}, extra={"x-user-id": "u1"}))
+check("chunked init -> upload_id", s == 200 and v.get("upload_id") and len(v["upload_id"]) >= 32, f"{s} {v}")
+UP_ID = v.get("upload_id")
+HALF = len(CHUNK) // 2
+s, v, _ = json_body(signed_req(APP_KEY, SECRET_A, "PUT", f"/v1/upload/{UP_ID}", body=CHUNK[:HALF], extra={"x-chunk-offset": "0"}))
+check("chunk 1 -> 200 received=HALF", s == 200 and v.get("received_size") == HALF, f"{s} {v}")
+s, v, _ = json_body(signed_req(APP_KEY, SECRET_A, "PUT", f"/v1/upload/{UP_ID}", body=CHUNK[HALF:], extra={"x-chunk-offset": str(HALF)}))
+check("chunk 2 -> 200 received=total", s == 200 and v.get("received_size") == len(CHUNK), f"{s} {v}")
+s, v, _ = json_body(signed_req(APP_KEY, SECRET_A, "POST", f"/v1/upload/{UP_ID}/finalize", body=b"", extra={"x-user-id": "u1"}))
+check("chunked finalize -> 200 + sha256", s == 200 and v.get("sha256") == sha256_hex(CHUNK), f"{s} {v}")
+CHUNK_FILE = v.get("file_id")
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/links/generate", obj={"file_id": CHUNK_FILE}))
+s, data, _ = req(PUB, "GET", f"/v1/download/{v.get('token')}")
+check("chunked roundtrip -> exact bytes", s == 200 and data == CHUNK, f"{s}")
+s, _, _ = req(PUB, "PUT", f"/v1/upload/{UP_ID}", body=b"x", headers={"x-chunk-offset": "0"})
+check("unauthenticated chunk PUT -> 401", s == 401, f"got {s}")
+
+# --- 10.3 per-app rate limit: 429 + Retry-After ---
+s, v = create_app("RateApp")
+RL_KEY, RL_SECRET = v["app_key"], v["app_secret"]
+retry_after = None
+for _ in range(200):
+    s, _, hdrs = json_body(signed_json(RL_KEY, RL_SECRET, "POST", "/v1/links/generate", obj={"file_id": 1}))
+    if s == 429:
+        retry_after = hdrs.get("retry-after")
+        break
+check("rate limit -> 429", retry_after is not None, "never hit 429")
+check("429 carries numeric Retry-After (seconds)", retry_after is not None and retry_after.isdigit() and int(retry_after) >= 1, f"retry-after={retry_after}")
+
+# --- 10.4 HEAD download ---
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/links/generate", obj={"file_id": FILE2}))
+HEAD_TOK = v.get("token")
+s, data, hdrs = req(PUB, "HEAD", f"/v1/download/{HEAD_TOK}")
+check("HEAD -> 200 + Content-Length + empty body", s == 200 and int(hdrs.get("content-length", "0")) == len(b"invoice-content") and len(data) == 0, f"{s} len(data)={len(data)} cl={hdrs.get('content-length')}")
+s, _, _ = req(PUB, "HEAD", "/v1/download/nope")
+check("HEAD unknown token -> 404", s == 404, f"got {s}")
+
+# --- 10.5 zip export organized by user ---
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/apps/export", obj={"format": "zip"}))
+ZJOB = v.get("job_id")
+ready = False
+for _ in range(50):
+    s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "GET", f"/v1/apps/exports/{ZJOB}"))
+    if v.get("status") == "ready":
+        ready = True
+        break
+    time.sleep(0.05)
+check("zip export job ready", ready, f"{v}")
+s, data, hdrs = signed_req(APP_KEY, SECRET_A, "GET", f"/v1/apps/exports/{ZJOB}/download")
+check("zip export download -> application/zip", s == 200 and "zip" in hdrs.get("content-type", ""), f"{s} {hdrs.get('content-type')}")
+import io, zipfile
+try:
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    names = zf.namelist()
+    users = {n.split("/")[1] for n in names if n.startswith("files/")}
+except Exception as e:
+    names, users = [], set()
+    print(f"  (zip inspect failed: {e})")
+check("zip entries organized by user_id", "u1" in users and "u2" in users, f"users={users}")
+
+# --- 10.6 idempotency key: same result, single row ---
+IDEM_BODY = b"idempotent-payload-" + os.urandom(8)
+s, v1, _ = json_body(signed_req(APP_KEY, SECRET_A, "POST", "/v1/upload", body=IDEM_BODY, extra={"x-user-id": "u1", "idempotency-key": "e2e-key-1"}))
+s, v2, _ = json_body(signed_req(APP_KEY, SECRET_A, "POST", "/v1/upload", body=IDEM_BODY, extra={"x-user-id": "u1", "idempotency-key": "e2e-key-1"}))
+check("idempotent retry -> same file_id", s == 200 and v1.get("file_id") == v2.get("file_id"), f"{v1} vs {v2}")
+
+# --- 10.7 export TTL: short-lived export job swept by maintenance ---
+s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "POST", "/v1/apps/export", obj={"format": "zip"}))
+TJOB = v.get("job_id")
+ready = False
+for _ in range(50):
+    s, v, _ = json_body(signed_json(APP_KEY, SECRET_A, "GET", f"/v1/apps/exports/{TJOB}"))
+    if v.get("status") == "ready":
+        ready = True
+        break
+    time.sleep(0.05)
+check("TTL export job ready", ready, f"{v}")
+s, _, _ = signed_req(APP_KEY, SECRET_A, "GET", f"/v1/apps/exports/{TJOB}/download")
+check("TTL export downloadable before sweep", s == 200, f"got {s}")
+# wait for the maintenance tick (interval ~3s) + the short TTL env knob (~12s)
+gone = False
+for _ in range(15):
+    time.sleep(2)
+    s, _, _ = signed_json(APP_KEY, SECRET_A, "GET", f"/v1/apps/exports/{TJOB}")
+    if s == 404:
+        gone = True
+        break
+check("export job swept after TTL", gone, f"job still visible")
 
 print()
 print("=" * 60)

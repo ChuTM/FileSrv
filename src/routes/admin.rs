@@ -306,3 +306,116 @@ pub async fn list_audit(AxState(st): AxState<AppState>, req: Request<Body>) -> A
 }
 
 use axum::http::StatusCode;
+
+// ---------------- Backups (§10) ----------------
+
+/// POST /admin/v1/backups/run — immediately snapshot the DB + archive the
+/// encrypted blob tree + write a sha256 manifest. No key material (server
+/// secret, admin token, app secrets) ever leaves the environment; see
+/// backup.rs for the key-management policy.
+pub async fn backup_run(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let ctx = query_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let out = {
+        let conn = st.db.lock().unwrap();
+        crate::backup::run_backup(&st.cfg, &st.ops, &conn)
+            .map_err(|e| ApiError::internal_msg(format!("Backup failed: {e}")))
+    }?;
+    {
+        let conn = st.db.lock().unwrap();
+        db::audit(&conn, &db::AuditEntry { actor: "admin", action: "backup.run", app_id: None, target: &out.backup_id, ip: &ctx.client_ip(), decision: "allow" }, Config::now());
+    }
+    Ok(Json(json!({
+        "backup_id": out.backup_id,
+        "id": out.id,
+        "status": "ready",
+        "size": out.size,
+        "files": out.files.iter().map(|(n, s, sha)| json!({
+            "name": n, "size": s, "sha256": sha
+        })).collect::<Vec<_>>()
+    }))
+    .into_response())
+}
+
+/// GET /admin/v1/backups — list known backups (newest first).
+pub async fn backup_list(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let ctx = query_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let conn = st.db.lock().unwrap();
+    let rows = db::list_backups(&conn)?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "backup_id": r.backup_id,
+                "status": r.status,
+                "created_at": r.created_at,
+                "finished_at": r.finished_at,
+                "size": r.size
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "backups": out })).into_response())
+}
+
+/// GET /admin/v1/backups/{id} — detail incl. the manifest. Unknown ids return
+/// the unified 404 (existence is hidden).
+pub async fn backup_detail(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let ctx = query_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let id: i64 = ctx
+        .path_segment(4)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| ApiError::bad_request("Invalid backup id."))?;
+    let conn = st.db.lock().unwrap();
+    let row = db::backup_by_id(&conn, id)?
+        .ok_or_else(|| ApiError::not_found("Backup not found."))?;
+    Ok(Json(json!({
+        "id": row.id,
+        "backup_id": row.backup_id,
+        "status": row.status,
+        "created_at": row.created_at,
+        "finished_at": row.finished_at,
+        "size": row.size,
+        "target_path": row.target_path,
+        "manifest": row.manifest.and_then(|m| serde_json::from_str::<Value>(&m).ok()),
+        "error": row.error
+    }))
+    .into_response())
+}
+
+/// PATCH /admin/v1/backups/config — {schedule?, target?, retention?}.
+/// target must resolve inside the configured backup root (path/symlink escape
+/// blocked); retention keeps the newest N copies.
+pub async fn backup_config(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
+    let (ctx, body) = body_ctx(&st, req).await?;
+    require_admin(&st, &ctx)?;
+    let body: Value = serde_json::from_slice(&body).map_err(ApiError::from)?;
+
+    let conn = st.db.lock().unwrap();
+    if let Some(schedule) = body.get("schedule").and_then(|v| v.as_i64()) {
+        if schedule < 0 {
+            return Err(ApiError::bad_request("schedule must be >= 0 seconds."));
+        }
+        db::set_setting(&conn, "schedule_secs", &schedule.to_string())?;
+    }
+    if let Some(target) = body.get("target").and_then(|v| v.as_str()) {
+        crate::backup::validate_target(&st.ops, target).map_err(ApiError::bad_request)?;
+        db::set_setting(&conn, "target", target)?;
+    }
+    if let Some(retention) = body.get("retention").and_then(|v| v.as_u64()) {
+        if !(1..=1000).contains(&retention) {
+            return Err(ApiError::bad_request("retention must be between 1 and 1000."));
+        }
+        db::set_setting(&conn, "retention", &retention.to_string())?;
+    }
+    let eff = crate::backup::effective_settings(&conn, &st.ops);
+    db::audit(&conn, &db::AuditEntry { actor: "admin", action: "backup.config", app_id: None, target: "", ip: &ctx.client_ip(), decision: "allow" }, Config::now());
+    Ok(Json(json!({
+        "schedule_secs": eff.schedule_secs,
+        "target": eff.target,
+        "retention": eff.retention
+    }))
+    .into_response())
+}
