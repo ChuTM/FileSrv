@@ -108,6 +108,10 @@ Call with a **user-context JWT** or **app identity**.
 
 Body: file content (streamed to a temp file, then verified).
 
+| Header | Value |
+|---|---|
+| `Idempotency-Key` | **optional** — retry guard (see §4.2) |
+
 Response `200`:
 
 ```json
@@ -129,6 +133,33 @@ Response `200`:
 - Payload is capped while streaming: over `max_payload_bytes` → `413`;
   quota full → `429`.
 - Optional `?folder_id=` query targets a folder (must belong to the app).
+
+### 4.2 Idempotent upload retries
+
+Send a client-generated `Idempotency-Key` header on `POST /v1/upload`. Within
+the configured window (`TENANT_FS_IDEMPOTENCY_WINDOW_SECS`, default 3600s,
+floor 60s) a retry carrying the **same key from the same identity** gets back
+the **original** upload result — no second blob is written, no quota is
+double-charged. After the window expires the key is forgotten and behaves as a
+brand-new upload. The cache is in-memory (best-effort retry guard, not a
+durable queue), hard-capped at `TENANT_FS_IDEMPOTENCY_MAX_ENTRIES` (default
+10000, LRU eviction).
+
+### 4.3 Chunked / resumable upload
+
+For large files or flaky networks, use the three-step session:
+
+| Step | Method & path | Behavior |
+|---|---|---|
+| 1. init | `POST /v1/upload/init` | Body `{ "total_size"?: <bytes>, "folder_id"?: <id> }`. Returns `{ "upload_id": "up_…", "status": "open", "total_size", "received_size": 0, "chunk_ttl_secs", "max_payload_bytes" }`. `total_size > 0` is rejected if it exceeds the app's `max_payload_bytes`. |
+| 2. chunk | `PUT /v1/upload/{upload_id}` | Raw chunk body, header `X-Chunk-Offset: <byte offset>`. Chunks must arrive **contiguously**: the offset must equal the server's current `received_size`. A gap → `409` with `{ "error": { "code": "conflict", "message": "Unexpected chunk offset; resume at N." } }` so the client can re-aim. App-level HMAC is verified per chunk. Returns `{ "upload_id", "received_size", "status": "open" }`. |
+| 3. finalize | `POST /v1/upload/{upload_id}/finalize` | Verifies the received byte count against `total_size`, re-checks quota atomically, SHA-256s the staged file, encrypt-writes the blob through the storage layer (see §13), and returns the same metadata shape as `POST /v1/upload`. |
+
+- Identity rules mirror `POST /v1/upload` (user JWT, or app HMAC with
+  `X-User-Id`); an unknown / expired / cross-tenant session → `404`.
+- Interrupted sessions expire after `TENANT_FS_UPLOAD_TTL_SECS` (default
+  86400s, floor 60s); staged partial files are unlinked by the background loop.
+- All three calls are metered by the per-app rate limiter (§11).
 
 ---
 
@@ -190,6 +221,14 @@ For end users, **no app key required**. The capability token binds
   trusted-proxy mode (`TENANT_FS_TRUST_XFF=true`). Otherwise a spoofed header
   has no effect.
 
+### `HEAD /v1/download/:token`
+
+Identical authentication, token rules and 404 semantics as `GET`, but
+response headers only — no body. Returns `Content-Length`, `ETag`
+(`"sha256-<hex>"`), `Content-Type`, `Content-Disposition`,
+`X-Content-Type-Options: nosniff`; `If-None-Match` → `304`; unknown / expired
+token → `404`. Use it for pre-flight size/etag checks before streaming.
+
 ---
 
 ## 7. Revoke a token
@@ -218,8 +257,12 @@ identity.app_id`. For user JWTs the list is filtered by access
 (`list`/`read`).
 
 `DELETE /v1/files/:id` — requires `delete`; **ownership check** (app + user
-ACL); soft-delete (tombstone), blob removed immediately, tokens dropped,
-usage freed. Success → `204`.
+ACL). Soft-delete: sets a tombstone (`deleted_at`), immediately frees the
+app's storage usage and drops every download token of the file (tokens fail
+`404` at once). The on-disk blob and DB row survive a grace window
+(`TENANT_FS_SOFT_DELETE_DAYS`, default 7) and are physically removed by the
+background purge loop every `TENANT_FS_PURGE_INTERVAL_SECS` (default 600s).
+Success → `204`.
 
 ### 8.2 Folders
 
@@ -273,6 +316,10 @@ app_id parameter is accepted).
 { "format": "tar", "scope": "all" }
 ```
 
+`format` accepts `"tar"` (default) or `"zip"`. `zip` is produced by the `zip`
+crate (no external process), and organises entries the same way as tar:
+`files/<user_id>/<storage_uuid>`.
+
 Response `202`:
 
 ```json
@@ -282,8 +329,12 @@ Response `202`:
 ### `GET /v1/apps/exports/:id` / `GET /v1/apps/exports/:id/download`
 
 `200`: `{ "status": "ready", "size": 12345, ... }`; still running → `202` (the
-status endpoint). The archive is a **tar** containing every non-deleted file,
-organised as `files/<user_id>/<storage_uuid>`.
+status endpoint). The archive is a **tar** or **zip** containing every
+non-deleted file, organised as `files/<user_id>/<storage_uuid>`.
+
+Finished export artifacts and their rows are swept after
+`TENANT_FS_EXPORT_TTL_SECS` (default 86400s, floor 1s) by the background
+maintenance loop.
 
 ---
 
@@ -310,6 +361,36 @@ Header: `Authorization: Bearer <ADMIN_TOKEN>`. **Never accepts
 |---|---|---|
 | GET | `/admin/v1/audit?app_id=&since=` | Query audit log (append-only), newest first, LIMIT 200 |
 
+### Backups (§14)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/admin/v1/backups/run` | Run a backup synchronously: DB snapshot (`VACUUM INTO`) + `blobs.tar` (envelope-encrypted blob tree, `dec_cache/` / finished exports / `tmp_*` partials excluded) + `manifest.json` with per-file sha256. Returns `{ "backup_id": "bk_…", "id", "status": "ready", "size", "files": [{name, size, sha256}] }`. |
+| GET | `/admin/v1/backups` | List known backups, newest first (`id, backup_id, status, created_at, finished_at, size`). |
+| GET | `/admin/v1/backups/{id}` | Detail incl. `target_path` and the parsed manifest; unknown id → `404`. |
+| PATCH | `/admin/v1/backups/config` | Body `{ "schedule"?: <secs>, "target"?: "<relative dir>", "retention"?: <1..1000> }`. Persisted in the DB and applied to the next run. `target` must be a relative directory name inside `TENANT_FS_BACKUP_ROOT` (canonicalize + `starts_with(root)`; absolute paths, `..`, `:` and `\` rejected). Returns the effective `{schedule_secs, target, retention}`. |
+
+Backup configuration knobs: `TENANT_FS_BACKUP_ROOT` (default `data/backups`),
+`TENANT_FS_BACKUP_RETENTION` (default 7, newest wins),
+`TENANT_FS_BACKUP_SCHEDULE_SECS` (default 0 = off; when > 0 the maintenance
+loop fires a run when the interval has elapsed since the last backup).
+
+### Admin console (static assets)
+
+A small HTML/JS console is embedded at compile time and served **only on the
+loopback admin bind** — the public router 404s all of it:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/admin`, `/admin/`, `/admin/index.html` | The HTML shell |
+| GET | `/admin/app.js`, `/admin/style.css` | Client-side assets |
+
+The page is pure client-side: it stores the admin bearer token in
+`sessionStorage` and calls `/admin/v1/*` itself. Every console response carries
+hardening headers: `Content-Security-Policy`, `X-Frame-Options: DENY`,
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`.
+
 ---
 
 ## 11. Limits and quotas
@@ -317,9 +398,14 @@ Header: `Authorization: Bearer <ADMIN_TOKEN>`. **Never accepts
 - **Storage quota** `quota_bytes` (app level) and `max_payload_bytes`
   (per file) — enforced atomically; over quota → `429 quota_exceeded`.
 - Payload over limit → `413 payload_too_large`.
-
-> Note: per-app rate limiting (generate / upload / export) is specified in the
-> roadmap but **not yet implemented** (see §13).
+- **Per-app rate limiting**: `generate`, `upload` (plain and chunked
+  init/chunk/finalize) and `export` share one fixed 60s window per `app_id`.
+  When the window is exhausted the call fails with `429`, response header
+  `Retry-After: <seconds until the window resets>` and body
+  `{ "error": { "code": "rate_limited", ... } }`.
+  Knobs: `TENANT_FS_RATE_LIMIT_PER_MIN` (default 120; 0 = disabled),
+  `TENANT_FS_RATE_LIMIT_MAX_ENTRIES` (default 10000; hard map capacity, stale
+  windows swept before it can grow).
 
 ---
 
@@ -331,32 +417,91 @@ Header: `Authorization: Bearer <ADMIN_TOKEN>`. **Never accepts
 | 401 | `unauthorized` | missing/wrong identity, bad signature, replay |
 | 403 | `forbidden` | rule denial (deny / no permission) |
 | 404 | `not_found` | file/app/token missing or expired (404 rather than 403 hides existence) |
-| 409 | `conflict` | state conflict (e.g. export not ready) |
+| 409 | `conflict` | state conflict (e.g. export not ready; chunk offset mismatch) |
 | 413 | `payload_too_large` | over the per-file limit |
 | 429 | `quota_exceeded` | app storage quota full |
+| 429 | `rate_limited` | per-app request window exhausted; `Retry-After` header set |
 | 500 | `internal` | server error |
 
 > Security note: non-existent resources always return **404**, never 403.
 
 ---
 
-## 13. Specified but NOT yet implemented (roadmap)
+## 13. Static encryption and key policy
 
-| Feature | Spec reference | Status |
-|---|---|---|
-| Backup API (`/admin/v1/backups/run`, `/backups`, `PATCH /backups/config {schedule?, target?, retention?}`) | spec §10 Backup | **Not implemented** — see `Ops-and-Backup.md` |
-| Chunked / resumable upload (`/v1/upload/init` → `PUT /v1/upload/{id}` → `finalize`) | spec §4 | Not implemented |
-| Per-app rate limiting + `Retry-After` | spec §11 | Not implemented |
-| Admin web page / HTML dashboard | roadmap | Not implemented (API only) |
-| `Idempotency-Key` on upload | spec §4 (recommended) | Not implemented |
-| `HEAD` on download, `zip` export format | spec §6/§9 | Not implemented (GET only; tar only) |
-| Export archive TTL + expiry cleanup | spec §9 | Not implemented |
-| Blob encryption at rest (envelope KEK/DEK) | roadmap §12 | Not implemented (plaintext blobs on disk) |
-| Grace-period purge after soft-delete | spec §8.1 | Not implemented (immediate blob removal) |
+Blobs are encrypted at rest by default (`TENANT_FS_ENCRYPT_BLOBS=true`). Each
+blob is a self-contained envelope:
+
+```
+[0..4]    magic "TSFS"
+[4]       format version = 1
+[5..17]   dek_nonce   (12 bytes, nonce sealing the DEK under the KEK)
+[17..65]  sealed_dek  (48 bytes = AES-256-GCM(KEK, dek_nonce, DEK[32]))
+[65..77]  body_nonce  (12 bytes)
+[77..]    ciphertext  = AES-256-GCM(DEK, body_nonce, plaintext)
+```
+
+- Every blob gets its own random 256-bit DEK; two encryptions of the same
+  plaintext produce different bytes.
+- **KEK policy**: the KEK is derived as `SHA-256(SERVER_SECRET)` — the same
+  derivation used for sealing app secrets. `SERVER_SECRET` lives **only** in
+  the deployment environment and is **never** copied into a backup (DB dump,
+  blob archive, manifest, volume snapshot, CI fixture). Because the sealed DEK
+  travels inside the blob header, a stolen backup without `SERVER_SECRET` holds
+  ciphertext that cannot be opened. Key material is never logged.
+- **Legacy plaintext**: blobs written before encryption (no `TSFS` magic) are
+  served through the legacy plaintext path transparently. `migrate_plaintext_blobs()`
+  is an idempotent one-shot migration that rewrites legacy blobs in place to the
+  envelope format.
+- **Decrypted read cache**: when serving an encrypted blob the server
+  materializes a per-uuid plaintext cache under `blob_root/dec_cache/` (atomic
+  swap). That cache is deliberately excluded from backups and from the export
+  trees; deletion and purge operate on the real encrypted file.
+
+## 14. Backup and disaster recovery
+
+- **`POST /admin/v1/backups/run`** produces one backup directory under
+  `TENANT_FS_BACKUP_ROOT` (default `data/backups`) containing `db.sqlite`
+  (consistent snapshot via `VACUUM INTO`), `blobs.tar` (the envelope-encrypted
+  app blob trees; `dec_cache/`, finished exports and `tmp_*` partials skipped),
+  and `manifest.json` listing each file with its size and sha256.
+- **No key material** ever lands in a backup: `SERVER_SECRET`, the admin token
+  and app secrets stay in the deployment environment. The DB snapshot contains
+  `apps.secret_sealed` (app secrets sealed under the KEK), which is useless
+  without `SERVER_SECRET`.
+- **Retention** keeps the newest N copies (`TENANT_FS_BACKUP_RETENTION`,
+  default 7; overridable 1–1000 via `PATCH /backups/config`). Obsolete
+  directories and rows are removed.
+- **Schedule** is off by default (`TENANT_FS_BACKUP_SCHEDULE_SECS=0`). When set
+  > 0 (or overridden in the DB via `PATCH /backups/config`), the maintenance
+  loop fires a run when the interval has elapsed since the last backup.
+- **Target whitelist**: `target` must be a relative directory name; it is
+  canonicalized and must stay inside the backup root — absolute paths, `..`,
+  `:` and `\` are rejected, blocking path/symlink escape.
+- **Restore** is an operator-side procedure (no restore endpoint yet): stop
+  the server, place the snapshot `fs.db` and untar `blobs.tar` back into the
+  blob root, then start the server with the same `SERVER_SECRET`. Missing blob
+  files surface as "File content missing." on download.
 
 ---
 
-## 14. Appendix: upload example (curl)
+## 15. Specified but NOT yet implemented (roadmap)
+
+| Feature | Notes |
+|---|---|
+| Backup **restore** endpoint | Backups are produced; restore is a manual operator procedure (§14). |
+| TLS / HSTS termination | Server speaks plain HTTP; terminate TLS at a reverse proxy. |
+| Malware / antivirus scanning of uploads | Not present. |
+| Operator / auditor role separation | Single shared `ADMIN_TOKEN` today; no role split. |
+| Webhook / push notification on export completion | Poll the status endpoint instead. |
+
+> Note: `TENANT_FS_ADMIN_TOKEN` still has a development default; the server
+> prints a loud startup WARNING (same treatment as `SERVER_SECRET`). Set both
+> explicitly in production.
+
+---
+
+## 16. Appendix: upload example (curl)
 
 App-level upload:
 
