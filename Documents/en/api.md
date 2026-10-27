@@ -366,7 +366,7 @@ Header: `Authorization: Bearer <ADMIN_TOKEN>`. **Never accepts
 | Method | Path | Description |
 |---|---|---|
 | POST | `/admin/v1/backups/run` | Run a backup synchronously: DB snapshot (`VACUUM INTO`) + `blobs.tar` (envelope-encrypted blob tree, `dec_cache/` / finished exports / `tmp_*` partials excluded) + `manifest.json` with per-file sha256. Returns `{ "backup_id": "bk_…", "id", "status": "ready", "size", "files": [{name, size, sha256}] }`. |
-| GET | `/admin/v1/backups` | List known backups, newest first (`id, backup_id, status, created_at, finished_at, size`). |
+| GET | `/admin/v1/backups` | List known backups, newest first (`id, backup_id, status, created_at, finished_at, size, path`). |
 | GET | `/admin/v1/backups/{id}` | Detail incl. `target_path` and the parsed manifest; unknown id → `404`. |
 | PATCH | `/admin/v1/backups/config` | Body `{ "schedule"?: <secs>, "target"?: "<relative dir>", "retention"?: <1..1000> }`. Persisted in the DB and applied to the next run. `target` must be a relative directory name inside `TENANT_FS_BACKUP_ROOT` (canonicalize + `starts_with(root)`; absolute paths, `..`, `:` and `\` rejected). Returns the effective `{schedule_secs, target, retention}`. |
 

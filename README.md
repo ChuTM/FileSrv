@@ -54,19 +54,31 @@ documents, images, …).
 
 ## Quick start
 
+Prerequisites: Rust toolchain (to build), `sqlite3` and `openssl` (for
+`setup-env.sh`). Works on Linux and macOS.
+
 ```bash
-cd tenant-fs-server
-# Environment (defaults shown):
-export TENANT_FS_DB=data/fs.db            # SQLite file
-export TENANT_FS_BLOBS=data/blobs         # blob root
-export TENANT_FS_ADMIN_TOKEN=dev-admin-token
-export TENANT_FS_SERVER_SECRET=dev-server-secret-change-me  # for token/secret encryption
-export TENANT_FS_PUBLIC_BIND=0.0.0.0:8080 # public API
-export TENANT_FS_ADMIN_BIND=127.0.0.1:8081# admin API (localhost only)
-cargo run --release
+cd rust-file-server
+# 1) Generate .env from .env.example with random SERVER_SECRET + ADMIN_TOKEN (mode 600).
+#    Idempotent: it never overwrites an existing .env.
+./scripts/setup-env.sh
+# 2) Review / adjust settings (ports, quotas, retention, …)
+nano .env
+# 3) Load .env and start the release binary
+./scripts/start.sh
 ```
 
-Then create an App:
+The server starts two listeners:
+
+- **public API** on `0.0.0.0:8080` — `/v1/*`, `/healthz`, `/.well-known/security.txt`
+- **admin API + console** on `127.0.0.1:8081` — loopback only
+
+Open the admin console at `http://127.0.0.1:8081/admin/`, sign in with the
+`TENANT_FS_ADMIN_TOKEN` from `.env`, then **Create App**. The console shows the
+returned `app_key` / `app_secret` — keep the secret server-side. Users are
+pre-provisioned per app from the console ("Users") or the admin API.
+
+Or create an App via the API:
 
 ```bash
 curl -X POST http://127.0.0.1:8081/admin/v1/apps \
@@ -75,8 +87,10 @@ curl -X POST http://127.0.0.1:8081/admin/v1/apps \
   -d '{"name":"my-app","quota_bytes":10737418240,"max_payload_bytes":104857600}'
 ```
 
-The response contains `app_key` and `app_secret` — keep the secret server-side.
-Full API reference: [`多租戶檔案儲存服務_API規範.md`](../多租戶檔案儲存服務_API規範.md).
+Full API reference: [`Documents/en/api.md`](Documents/en/api.md) /
+[`Documents/zh/api.md`](Documents/zh/api.md). Production deployment on Linux
+(systemd + Caddy TLS, non-root hardening): [`Documents/en/deploy.md`](Documents/en/deploy.md) /
+[`Documents/zh/deploy.md`](Documents/zh/deploy.md).
 
 ## Verify
 
@@ -127,6 +141,14 @@ Additional hardening knobs:
 ## Layout
 
 ```
+scripts/
+  setup-env.sh     generate .env from .env.example with random secrets (idempotent)
+  start.sh         load .env and start the release binary
+  backup.sh        optional whole-`data/` snapshot to a path you specify
+.env.example       template of all TENANT_FS_* settings (commented, safe defaults)
+Documents/
+  en/              English docs: api.md, deploy.md
+  zh/              繁體中文 docs: api.md, deploy.md
 src/
   main.rs         two listeners: public + admin (localhost), maintenance loop
   lib.rs          build_app(cfg) -> routers
@@ -163,5 +185,5 @@ the next generate.
 For backup / compliance topics (blob envelope encryption, key policy, the
 built-in backup API, retention/schedule, restore procedure, audit retention)
 see [`Documents/Ops-and-Backup.md`](Documents/Ops-and-Backup.md) and the full
-[`Documents/API-Spec-en.md`](Documents/API-Spec-en.md) /
-[`Documents/API-Spec-zh.md`](Documents/API-Spec-zh.md).
+[`Documents/en/api.md`](Documents/en/api.md) /
+[`Documents/zh/api.md`](Documents/zh/api.md).

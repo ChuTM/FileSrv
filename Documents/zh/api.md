@@ -308,7 +308,7 @@ Header：`Authorization: Bearer <ADMIN_TOKEN>`。**永不接受 `X-App-Key`／HM
 | 方法 | 路徑 | 說明 |
 |---|---|---|
 | POST | `/admin/v1/backups/run` | 同步執行備份：DB 快照（`VACUUM INTO`）＋ `blobs.tar`（信封加密的 blob 樹，排除 `dec_cache/`、完成的導出產物、`tmp_*` 暫存）＋ `manifest.json`（每檔 sha256）。回傳 `{ "backup_id": "bk_…", "id", "status": "ready", "size", "files": [{name, size, sha256}] }`。 |
-| GET | `/admin/v1/backups` | 列出已知備份，最新在前（`id, backup_id, status, created_at, finished_at, size`）。 |
+| GET | `/admin/v1/backups` | 列出已知備份，最新在前（`id, backup_id, status, created_at, finished_at, size, path`）。 |
 | GET | `/admin/v1/backups/{id}` | 明細，含 `target_path` 與解析後的 manifest；未知 id → `404`。 |
 | PATCH | `/admin/v1/backups/config` | Body `{ "schedule"?: <秒>, "target"?: "<相對目錄>", "retention"?: <1..1000> }`。寫入 DB 並套用於下次執行。`target` 必須是 `TENANT_FS_BACKUP_ROOT` 內的相對目錄名（canonicalize + `starts_with(root)`；拒絕絕對路徑、`..`、`:`、`\`）。回傳生效值 `{schedule_secs, target, retention}`。 |
 
