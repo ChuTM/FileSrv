@@ -24,7 +24,9 @@ const SECURITY_TXT: &str = include_str!("admin_ui/static/.well-known/security.tx
 
 const CSP: &str = concat!(
     "default-src 'self'; ",
-    "style-src 'unsafe-inline'; ",
+    // Allow same-origin stylesheet AND inline styles (app.js sets styles via
+    // the CSSOM). Omitting 'self' here blocks style.css entirely — a real bug.
+    "style-src 'self' 'unsafe-inline'; ",
     "script-src 'self'; ",
     "img-src 'self'; ",
     "base-uri 'none'; ",

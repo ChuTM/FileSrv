@@ -430,7 +430,8 @@ pub async fn backup_list(AxState(st): AxState<AppState>, req: Request<Body>) -> 
                 "status": r.status,
                 "created_at": r.created_at,
                 "finished_at": r.finished_at,
-                "size": r.size
+                "size": r.size,
+                "path": r.target_path
             })
         })
         .collect();

@@ -11,19 +11,39 @@
 
 <!-- Login view: shown when no admin token is held -->
 <div id="view-login" class="login-wrap" hidden>
-  <form id="login-form" class="login-card" autocomplete="off">
-    <div class="brand-mark" aria-hidden="true"></div>
-    <h1>File Storage Service</h1>
-    <p class="login-sub">Admin Console · loopback access only</p>
-    <label class="field">
-      <span class="field-label">Admin Token</span>
-      <input id="login-token" type="password" required spellcheck="false"
-             autocapitalize="off" autocomplete="off" placeholder="Paste TENANT_FS_ADMIN_TOKEN">
-    </label>
-    <p id="login-error" class="form-error" role="alert" hidden></p>
-    <button type="submit" class="btn btn-primary btn-block">Sign in</button>
-    <p class="login-note">The token lives only in this page's session (sessionStorage); it survives a refresh and is cleared when the tab closes. It is never written to the URL or to disk.</p>
-  </form>
+  <div class="login-stage">
+    <div class="color-blocks" aria-hidden="true">
+      <div class="block block-1"></div>
+      <div class="block block-2"></div>
+      <div class="block block-3"></div>
+      <div class="block block-4"></div>
+      <div class="block block-5"></div>
+    </div>
+
+    <div class="login-side">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <p class="brand-name">File Storage Service</p>
+          <p class="brand-sub">Admin Console</p>
+        </div>
+      </div>
+
+      <div class="title-block">
+        <h2>Sign in</h2>
+        <p>Admin Console · loopback access only</p>
+      </div>
+
+      <form id="login-form" class="login-form" autocomplete="off">
+        <label for="login-token">Admin Token</label>
+        <input id="login-token" type="password" required spellcheck="false"
+               autocapitalize="off" autocomplete="off" placeholder="Paste TENANT_FS_ADMIN_TOKEN">
+        <p id="login-error" class="err" role="alert" hidden></p>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+        <p class="login-note">The token lives only in this page's session (sessionStorage); it survives a refresh and is cleared when the tab closes. It is never written to the URL or to disk.</p>
+      </form>
+    </div>
+  </div>
 </div>
 
 <!-- Main app shell: shown after login succeeds -->

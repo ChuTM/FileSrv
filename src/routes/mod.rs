@@ -7,6 +7,7 @@ use crate::authz::Identity;
 use crate::error::ApiError;
 use crate::state::AppState;
 use axum::http::HeaderMap;
+use axum::response::Redirect;
 use axum::Router;
 
 /// Shared request-parsing helpers for handlers that need raw bytes (for
@@ -178,11 +179,18 @@ pub fn public_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// `/admin` without a trailing slash would resolve relative asset paths
+/// (`style.css`, `app.js`) against the root — 404. Redirect to `/admin/` so the
+/// console always loads correctly.
+async fn redirect_admin_root() -> Redirect {
+    Redirect::permanent("/admin/")
+}
+
 pub fn admin_router(state: AppState) -> Router {
     Router::new()
         // Admin console static assets — embedded at compile time, loopback only.
         // No data ships here; the app itself calls bearer-authenticated /admin/v1/*.
-        .route("/admin", axum::routing::get(crate::admin_ui::index_html))
+        .route("/admin", axum::routing::get(redirect_admin_root))
         .route("/admin/", axum::routing::get(crate::admin_ui::index_html))
         .route("/admin/index.html", axum::routing::get(crate::admin_ui::index_html))
         .route("/admin/app.js", axum::routing::get(crate::admin_ui::app_js))

@@ -579,24 +579,40 @@
     var wrap = document.getElementById('backup-wrap');
     clear(wrap);
     var list = (data.backups || data.entries || []);
-    wrap.appendChild(h('div', { style: 'padding:16px 18px;display:flex;gap:8px;align-items:center;' }, [
-      h('button', { class: 'btn btn-primary btn-sm', text: 'Back Up Now', onclick: function () {
-        api('POST', '/backups/run').then(loadBackup).catch(function (e) { showGlobalError(e.message); });
-      }}),
-      h('span', { class: 'cell-muted', text: 'Spec-defined; may change between versions' })
+    var statusSpan = h('span', { id: 'backup-status', class: 'cell-muted', text: '' });
+    var runBtn = h('button', { class: 'btn btn-primary btn-sm', text: 'Back Up Now' });
+    runBtn.addEventListener('click', function () {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Backing up…';
+      statusSpan.textContent = 'Snapshotting the database and blob storage — this may take a moment.';
+      statusSpan.className = 'cell-muted';
+      api('POST', '/backups/run').then(function () {
+        loadBackup();
+      }).catch(function (e) {
+        runBtn.disabled = false;
+        runBtn.textContent = 'Back Up Now';
+        statusSpan.textContent = 'Backup failed: ' + e.message;
+        statusSpan.className = 'banner banner-error';
+        showGlobalError('Backup failed: ' + e.message);
+      });
+    });
+    wrap.appendChild(h('div', { style: 'padding:16px 18px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [
+      runBtn,
+      statusSpan
     ]));
     if (!list.length) {
-      wrap.appendChild(h('div', { class: 'empty', text: 'No backups yet.' }));
+      wrap.appendChild(h('div', { class: 'empty', text: 'No backups yet. Run "Back Up Now" to create the first snapshot.' }));
       return;
     }
     wrap.appendChild(h('table', {}, [
-      h('thead', {}, [h('tr', {}, [th('ID'), th('Status'), th('Size'), th('Finished')])]),
+      h('thead', {}, [h('tr', {}, [th('ID'), th('Status'), th('Size'), th('Finished'), th('Location')])]),
       h('tbody', {}, list.map(function (b) {
         return h('tr', {}, [
           h('td', { class: 'mono', text: String(b.id != null ? b.id : '—') }),
           h('td', {}, [h('span', { class: 'cell-2', text: b.status || '—' })]),
           h('td', { class: 'cell-2', text: fmtBytes(b.size) }),
-          h('td', { class: 'cell-2', text: fmtTs(b.finished_at || b.created_at) })
+          h('td', { class: 'cell-2', text: fmtTs(b.finished_at || b.created_at) }),
+          h('td', { class: 'mono cell-muted', style: 'font-size:11.5px;word-break:break-all;', text: b.path || '—' })
         ]);
       }))
     ]));
@@ -618,7 +634,14 @@
     });
     document.getElementById('audit-refresh').addEventListener('click', loadAudit);
 
-    if (token()) { afterLogin(); }
+    if (token()) {
+      afterLogin();
+    } else {
+      /* index.html ships both views `hidden`; once CSS enforces `hidden`,
+         the login view must be shown explicitly for the no-token case. */
+      document.getElementById('view-login').hidden = false;
+      document.getElementById('app-shell').hidden = true;
+    }
   }
 
   if (document.readyState === 'loading') {
