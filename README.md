@@ -87,10 +87,34 @@ curl -X POST http://127.0.0.1:8081/admin/v1/apps \
   -d '{"name":"my-app","quota_bytes":10737418240,"max_payload_bytes":104857600}'
 ```
 
-Full API reference: [`Documents/en/api.md`](Documents/en/api.md) /
-[`Documents/zh/api.md`](Documents/zh/api.md). Production deployment on Linux
+App-facing API reference: [`Documents/en/api.md`](Documents/en/api.md) /
+[`Documents/zh/api.md`](Documents/zh/api.md). Admin API (loopback only, apps /
+users / audit / backups / console): [`development/admin-api.md`](development/admin-api.md).
+Production deployment on Linux
 (systemd + Caddy TLS, non-root hardening): [`Documents/en/deploy.md`](Documents/en/deploy.md) /
 [`Documents/zh/deploy.md`](Documents/zh/deploy.md).
+
+## Admin CLI (over SSH)
+
+For operators managing the server from a shell (e.g. over SSH), a
+command-line front-end to the same loopback admin API ships as
+`scripts/admin-cli.sh`. It reads the token and endpoints from `.env` (or
+`TENANT_FS_ADMIN_TOKEN`), so it runs straight from the project directory:
+
+```bash
+./scripts/admin-cli.sh --help                        # list all commands
+./scripts/admin-cli.sh apps                          # list apps
+./scripts/admin-cli.sh app create my-app --quota 1GiB --max-file 64MiB
+./scripts/admin-cli.sh app rotate-secret 1
+./scripts/admin-cli.sh user add 1 alice@example.com
+./scripts/admin-cli.sh audit --since 86400
+./scripts/admin-cli.sh backup run && ./scripts/admin-cli.sh backup list
+./scripts/admin-cli.sh health
+```
+
+Requires `curl` and `jq` (or `python3`) on the host. Intended for the server
+itself (admin API is loopback-only); use `--admin-bind` / `--token` to target a
+reachable admin endpoint from elsewhere.
 
 ## Verify
 
@@ -145,10 +169,14 @@ scripts/
   setup-env.sh     generate .env from .env.example with random secrets (idempotent)
   start.sh         load .env and start the release binary
   backup.sh        optional whole-`data/` snapshot to a path you specify
+  admin-cli.sh     shell admin console (SSH) — apps / users / audit / backup
 .env.example       template of all TENANT_FS_* settings (commented, safe defaults)
 Documents/
-  en/              English docs: api.md, deploy.md
-  zh/              繁體中文 docs: api.md, deploy.md
+  en/              English docs: api.md (app-facing), deploy.md
+  zh/              繁體中文 docs: api.md (app-facing), deploy.md
+development/
+  admin-api.md     loopback admin API: apps / users / audit / backups / console
+  (规划/测试报告)     internal planning & test reports
 src/
   main.rs         two listeners: public + admin (localhost), maintenance loop
   lib.rs          build_app(cfg) -> routers
@@ -184,6 +212,7 @@ the next generate.
 
 For backup / compliance topics (blob envelope encryption, key policy, the
 built-in backup API, retention/schedule, restore procedure, audit retention)
-see [`Documents/Ops-and-Backup.md`](Documents/Ops-and-Backup.md) and the full
+see [`Documents/Ops-and-Backup.md`](Documents/Ops-and-Backup.md), the admin API
+in [`development/admin-api.md`](development/admin-api.md) and the app-facing
 [`Documents/en/api.md`](Documents/en/api.md) /
 [`Documents/zh/api.md`](Documents/zh/api.md).
