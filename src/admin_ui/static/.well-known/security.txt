@@ -1,7 +1,7 @@
 # security.txt — security disclosure contact policy (RFC 9116)
 # https://www.rfc-editor.org/rfc/rfc9116
 #
-# If you believe you have found a security issue in tenant-fs-server, please
+# If you believe you have found a security issue in filesrv, please
 # report it to the contact below. Do NOT file a public issue with the details.
 # Applicable for files.scc.edu.hk and alb.scc.edu.hk.
 

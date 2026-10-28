@@ -20,7 +20,8 @@ documents, images, …).
     the TTL unless revoked).
   - ACLs: per-file and per-folder, per-action (read/write/delete/list/export),
     folder inheritance, deny-wins-everything, owner default access, `"*"`
-    wildcard and `public_read`.
+    wildcard, `public_read`, and `g:<group>` references (groups are managed via
+    the admin API / `filesrv-cli admin group …`).
   - Requests: `X-App-Key` + HMAC-SHA256 signature over
     `method\npath\nquery\nbody_hash\nts\nnonce`, ±300s timestamp window,
     single-use nonce (replay protection), constant-time comparisons.
@@ -97,24 +98,35 @@ Production deployment on Linux
 ## Admin CLI (over SSH)
 
 For operators managing the server from a shell (e.g. over SSH), a
-command-line front-end to the same loopback admin API ships as
-`scripts/admin-cli.sh`. It reads the token and endpoints from `.env` (or
-`TENANT_FS_ADMIN_TOKEN`), so it runs straight from the project directory:
+command-line front-end ships as `scripts/filesrv-cli.sh`. It reads the token
+and endpoints from `.env` (or `TENANT_FS_ADMIN_TOKEN`), so it runs straight
+from the project directory:
 
 ```bash
-./scripts/admin-cli.sh --help                        # list all commands
-./scripts/admin-cli.sh apps                          # list apps
-./scripts/admin-cli.sh app create my-app --quota 1GiB --max-file 64MiB
-./scripts/admin-cli.sh app rotate-secret 1
-./scripts/admin-cli.sh user add 1 alice@example.com
-./scripts/admin-cli.sh audit --since 86400
-./scripts/admin-cli.sh backup run && ./scripts/admin-cli.sh backup list
-./scripts/admin-cli.sh health
+sh scripts/filesrv-cli.sh --help                       # list all commands
+sh scripts/filesrv-cli.sh health                       # non-sensitive: /healthz
+sh scripts/filesrv-cli.sh admin apps                   # list apps
+sh scripts/filesrv-cli.sh admin app create my-app --quota 1GiB --max-file 64MiB
+sh scripts/filesrv-cli.sh admin app rotate-secret 1
+sh scripts/filesrv-cli.sh admin user add 1 alice@example.com
+sh scripts/filesrv-cli.sh admin audit --since 86400
+sh scripts/filesrv-cli.sh admin backup run && sh scripts/filesrv-cli.sh admin backup list
 ```
 
-Requires `curl` and `jq` (or `python3`) on the host. Intended for the server
-itself (admin API is loopback-only); use `--admin-bind` / `--token` to target a
-reachable admin endpoint from elsewhere.
+Admin actions live under the `admin` namespace and need the admin token;
+`health` and `version` are non-sensitive and need no token. Requires `curl`
+and `jq` (or `python3`) on the host. Intended for the server itself (admin API
+is loopback-only); use `--admin-bind` / `--token` to target a reachable admin
+endpoint from elsewhere.
+
+Whenever `filesrv-cli.sh` runs from an interactive terminal and a `filesrv`
+shell alias is not yet configured, it offers to add one so you can type
+`filesrv admin …` directly. This happens after the requested command runs (and
+also when the CLI is invoked with no command). Answer `Y` and it writes
+`alias filesrv=sh <absolute path>` into your shell rc file (`~/.zshrc` for zsh,
+`~/.bashrc` for bash) and tells you to restart the shell. The prompt only
+appears on an interactive terminal — it is skipped in scripts, pipes and CI —
+and stops once the alias is configured.
 
 ## Verify
 
@@ -169,7 +181,7 @@ scripts/
   setup-env.sh     generate .env from .env.example with random secrets (idempotent)
   start.sh         load .env and start the release binary
   backup.sh        optional whole-`data/` snapshot to a path you specify
-  admin-cli.sh     shell admin console (SSH) — apps / users / audit / backup
+  filesrv-cli.sh    shell front-end (SSH): filesrv-cli admin … / health / version
 .env.example       template of all TENANT_FS_* settings (commented, safe defaults)
 Documents/
   en/              English docs: api.md (app-facing), deploy.md

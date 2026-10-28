@@ -143,6 +143,19 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           manifest TEXT,
           error TEXT
         );
+
+        -- User groups per tenant (admin-managed). ACL rules may reference a
+        -- group as "g:<name>" instead of listing each user_id; members is a
+        -- JSON array of user_id strings. Decided in Rust (no SQLite JSON1
+        -- dependency).
+        CREATE TABLE IF NOT EXISTS app_groups(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          app_id INTEGER NOT NULL REFERENCES apps(id),
+          name TEXT NOT NULL,
+          members TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          UNIQUE(app_id, name)
+        );
         "#,
     )
 }
@@ -202,6 +215,105 @@ pub fn app_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<AppRow>>
         })
     })?;
     rows.next().transpose()
+}
+
+pub struct GroupRow {
+    pub id: i64,
+    pub app_id: i64,
+    pub name: String,
+    pub members: Vec<String>,
+    pub created_at: i64,
+}
+
+fn group_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
+    let members: String = r.get(3)?;
+    let members: Vec<String> = serde_json::from_str(&members).unwrap_or_default();
+    Ok(GroupRow {
+        id: r.get(0)?,
+        app_id: r.get(1)?,
+        name: r.get(2)?,
+        members,
+        created_at: r.get(4)?,
+    })
+}
+
+const GROUP_SELECT: &str =
+    "SELECT id,app_id,name,members,created_at FROM app_groups";
+
+pub fn group_by_name(conn: &Connection, app_id: i64, name: &str) -> rusqlite::Result<Option<GroupRow>> {
+    let mut stmt = conn.prepare(&format!("{GROUP_SELECT} WHERE app_id=?1 AND name=?2"))?;
+    let mut rows = stmt.query_map(params![app_id, name], group_from_row)?;
+    rows.next().transpose()
+}
+
+pub fn list_groups(conn: &Connection, app_id: i64) -> rusqlite::Result<Vec<GroupRow>> {
+    let mut stmt = conn.prepare(&format!("{GROUP_SELECT} WHERE app_id=?1 ORDER BY name"))?;
+    let rows = stmt.query_map(params![app_id], group_from_row)?;
+    rows.collect()
+}
+
+/// Create a group (empty members). Fails with the UNIQUE constraint error if
+/// a group with the same name already exists in this tenant.
+pub fn create_group(conn: &Connection, app_id: i64, name: &str) -> rusqlite::Result<GroupRow> {
+    conn.execute(
+        "INSERT INTO app_groups(app_id,name,members,created_at) VALUES(?1,?2,'[]',?3)",
+        params![app_id, name, Config::now()],
+    )?;
+    Ok(group_by_name(conn, app_id, name)?.expect("group just inserted"))
+}
+
+pub fn delete_group(conn: &Connection, app_id: i64, name: &str) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM app_groups WHERE app_id=?1 AND name=?2",
+        params![app_id, name],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn add_group_member(conn: &Connection, app_id: i64, name: &str, user_id: &str) -> rusqlite::Result<Option<GroupRow>> {
+    let g = match group_by_name(conn, app_id, name)? {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    if !g.members.iter().any(|x| x == user_id) {
+        let mut m = g.members;
+        m.push(user_id.to_string());
+        conn.execute(
+            "UPDATE app_groups SET members=?1 WHERE app_id=?2 AND name=?3",
+            params![serde_json::to_string(&m).unwrap_or_else(|_| "[]".into()), app_id, name],
+        )?;
+    }
+    group_by_name(conn, app_id, name)
+}
+
+pub fn remove_group_member(conn: &Connection, app_id: i64, name: &str, user_id: &str) -> rusqlite::Result<Option<GroupRow>> {
+    if group_by_name(conn, app_id, name)?.is_none() {
+        return Ok(None);
+    }
+    let g = group_by_name(conn, app_id, name)?.unwrap();
+    let m: Vec<String> = g.members.into_iter().filter(|x| x != user_id).collect();
+    conn.execute(
+        "UPDATE app_groups SET members=?1 WHERE app_id=?2 AND name=?3",
+        params![serde_json::to_string(&m).unwrap_or_else(|_| "[]".into()), app_id, name],
+    )?;
+    group_by_name(conn, app_id, name)
+}
+
+/// All group names whose members JSON contains the given user_id.
+pub fn user_group_names(conn: &Connection, app_id: i64, user_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT name,members FROM app_groups WHERE app_id=?1")?;
+    let rows = stmt.query_map(params![app_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (name, members) = r?;
+        let m: Vec<String> = serde_json::from_str(&members).unwrap_or_default();
+        if m.iter().any(|x| x == user_id) {
+            out.push(name);
+        }
+    }
+    Ok(out)
 }
 
 pub struct FileRow {

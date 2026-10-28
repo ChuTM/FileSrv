@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start.sh — load .env into the environment and start tenant-fs-server.
+# start.sh — load .env into the environment and start filesrv.
 #
 # Reads every KEY=VALUE line from .env (including the required secrets),
 # sanity-checks them, then execs the release binary.
@@ -26,11 +26,11 @@ set +a
 : "${TENANT_FS_SERVER_SECRET:?TENANT_FS_SERVER_SECRET is not set in .env}"
 : "${TENANT_FS_ADMIN_TOKEN:?TENANT_FS_ADMIN_TOKEN is not set in .env}"
 
-if [ ! -x "target/release/tenant-fs-server" ]; then
-  echo "ERROR: target/release/tenant-fs-server not found." \
+if [ ! -x "target/release/filesrv" ]; then
+  echo "ERROR: target/release/filesrv not found." \
        "Run 'cargo build --release' first." >&2
   exit 1
 fi
 
-echo "Starting tenant-fs-server (public=${TENANT_FS_PUBLIC_BIND:-0.0.0.0:8080}, admin=${TENANT_FS_ADMIN_BIND:-127.0.0.1:8081})"
-exec ./target/release/tenant-fs-server "$@"
+echo "Starting filesrv (public=${TENANT_FS_PUBLIC_BIND:-0.0.0.0:8080}, admin=${TENANT_FS_ADMIN_BIND:-127.0.0.1:8081})"
+exec ./target/release/filesrv "$@"

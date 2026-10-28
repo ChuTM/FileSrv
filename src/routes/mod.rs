@@ -1,6 +1,13 @@
+pub mod acl;
 pub mod admin;
-pub mod app;
+pub mod common;
 pub mod download;
+pub mod export;
+pub mod files;
+pub mod folders;
+pub mod groups;
+pub mod tokens;
+pub mod upload;
 
 use crate::auth::{self, AuthError};
 use crate::authz::Identity;
@@ -135,36 +142,56 @@ fn auth_err_to_api(e: AuthError) -> ApiError {
     }
 }
 
+async fn healthz() -> &'static str {
+    "OK"
+}
+
 pub fn public_router(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", axum::routing::get(app::healthz))
-        .route("/v1/upload", axum::routing::post(app::upload))
-        .route("/v1/links/generate", axum::routing::post(app::generate_link))
-        .route("/v1/tokens/revoke", axum::routing::post(app::revoke_token))
-        .route("/v1/files", axum::routing::get(app::list_files))
-        .route("/v1/files/{id}", axum::routing::get(app::get_file).delete(app::delete_file))
-        .route("/v1/files/{id}/acl", axum::routing::patch(app::patch_file_acl))
-        .route("/v1/files/batch/acl", axum::routing::post(app::batch_acl))
-        .route("/v1/folders", axum::routing::post(app::create_folder))
+        .route("/healthz", axum::routing::get(healthz))
+        .route("/v1/upload", axum::routing::post(upload::upload))
+        .route("/v1/links/generate", axum::routing::post(tokens::generate_link))
+        .route("/v1/tokens/revoke", axum::routing::post(tokens::revoke_token))
+        .route("/v1/files", axum::routing::get(files::list_files))
+        .route("/v1/files/{id}", axum::routing::get(files::get_file).delete(files::delete_file))
+        .route("/v1/files/{id}/acl", axum::routing::patch(acl::patch_file_acl))
+        .route("/v1/files/batch/acl", axum::routing::post(acl::batch_acl))
+        .route("/v1/folders", axum::routing::post(folders::create_folder))
         .route(
             "/v1/folders/{id}",
-            axum::routing::get(app::get_folder)
-                .patch(app::patch_folder)
-                .delete(app::delete_folder),
+            axum::routing::get(folders::get_folder)
+                .patch(folders::patch_folder)
+                .delete(folders::delete_folder),
         )
-        .route("/v1/folders/{id}/files", axum::routing::get(app::list_folder_files))
-        .route("/v1/folders/{id}/acl", axum::routing::patch(app::patch_folder_acl))
-        .route("/v1/apps/export", axum::routing::post(app::export_files))
-        .route("/v1/apps/exports/{id}", axum::routing::get(app::export_status))
+        .route("/v1/folders/{id}/files", axum::routing::get(folders::list_folder_files))
+        .route("/v1/folders/{id}/acl", axum::routing::patch(folders::patch_folder_acl))
+        .route(
+            "/v1/groups",
+            axum::routing::post(groups::create_group).get(groups::list_groups),
+        )
+        .route(
+            "/v1/groups/{name}",
+            axum::routing::get(groups::get_group).delete(groups::delete_group),
+        )
+        .route(
+            "/v1/groups/{name}/members",
+            axum::routing::post(groups::add_group_member),
+        )
+        .route(
+            "/v1/groups/{name}/members/{user_id}",
+            axum::routing::delete(groups::remove_group_member),
+        )
+        .route("/v1/apps/export", axum::routing::post(export::export_files))
+        .route("/v1/apps/exports/{id}", axum::routing::get(export::export_status))
         .route(
             "/v1/apps/exports/{id}/download",
-            axum::routing::get(app::export_download),
+            axum::routing::get(export::export_download),
         )
-        .route("/v1/upload/init", axum::routing::post(app::upload_init))
-        .route("/v1/upload/{upload_id}", axum::routing::put(app::upload_chunk))
+        .route("/v1/upload/init", axum::routing::post(upload::upload_init))
+        .route("/v1/upload/{upload_id}", axum::routing::put(upload::upload_chunk))
         .route(
             "/v1/upload/{upload_id}/finalize",
-            axum::routing::post(app::upload_finalize),
+            axum::routing::post(upload::upload_finalize),
         )
         .route(
             "/v1/download/{token}",
@@ -191,10 +218,27 @@ pub fn admin_router(state: AppState) -> Router {
         // Admin console static assets — embedded at compile time, loopback only.
         // No data ships here; the app itself calls bearer-authenticated /admin/v1/*.
         .route("/admin", axum::routing::get(redirect_admin_root))
-        .route("/admin/", axum::routing::get(crate::admin_ui::index_html))
-        .route("/admin/index.html", axum::routing::get(crate::admin_ui::index_html))
+        // Login page (unchanged design) + shared admin assets.
+        .route("/admin/", axum::routing::get(crate::admin_ui::login_html))
+        .route("/admin/login.html", axum::routing::get(crate::admin_ui::login_html))
         .route("/admin/app.js", axum::routing::get(crate::admin_ui::app_js))
         .route("/admin/style.css", axum::routing::get(crate::admin_ui::style_css))
+        .route("/admin/gsap.min.js", axum::routing::get(crate::admin_ui::gsap_js))
+        .route("/admin/dashboard.css", axum::routing::get(crate::admin_ui::dashboard_css))
+        // Dashboard surface (redesigned): one page per tab, extension-less and
+        // trailing-slash tolerant (/dashboard/apps and /dashboard/apps/ both
+        // work). app.js dispatches on body[data-page]; the real API stays on
+        // bearer-authenticated /admin/v1/*.
+        .route("/dashboard/apps", axum::routing::get(crate::admin_ui::apps_html))
+        .route("/dashboard/apps/", axum::routing::get(crate::admin_ui::apps_html))
+        .route("/dashboard/audit", axum::routing::get(crate::admin_ui::audit_html))
+        .route("/dashboard/audit/", axum::routing::get(crate::admin_ui::audit_html))
+        .route("/dashboard/backup", axum::routing::get(crate::admin_ui::backup_html))
+        .route("/dashboard/backup/", axum::routing::get(crate::admin_ui::backup_html))
+        .route("/dashboard/archive", axum::routing::get(crate::admin_ui::archive_html))
+        .route("/dashboard/archive/", axum::routing::get(crate::admin_ui::archive_html))
+        .route("/dashboard/settings", axum::routing::get(crate::admin_ui::settings_html))
+        .route("/dashboard/settings/", axum::routing::get(crate::admin_ui::settings_html))
         .route("/admin/v1/apps", axum::routing::post(admin::create_app).get(admin::list_apps))
         .route(
             "/admin/v1/apps/{id}",
@@ -203,6 +247,29 @@ pub fn admin_router(state: AppState) -> Router {
                 .delete(admin::delete_app),
         )
         .route(
+            "/admin/v1/apps/{id}/restore",
+            axum::routing::post(admin::restore_app),
+        )
+        .route(
+            "/admin/v1/apps/{id}/purge",
+            axum::routing::post(admin::purge_app),
+        )
+        .route(
+            "/admin/v1/apps/{id}/archive",
+            axum::routing::post(admin::archive_app),
+        )
+        .route(
+            "/admin/v1/apps/{id}/unarchive",
+            axum::routing::post(admin::unarchive_app),
+        )
+        .route(
+            "/admin/v1/apps/{id}/wipe",
+            axum::routing::post(admin::wipe_app),
+        )
+        .route("/admin/v1/storage/recompute", axum::routing::post(admin::recompute_usage))
+        .route("/admin/v1/storage/audit", axum::routing::post(admin::audit_storage))
+        .route("/admin/v1/storage/info", axum::routing::get(admin::storage_info))
+        .route(
             "/admin/v1/apps/{id}/secret/rotate",
             axum::routing::post(admin::rotate_secret),
         )
@@ -210,6 +277,22 @@ pub fn admin_router(state: AppState) -> Router {
         .route(
             "/admin/v1/apps/{id}/users",
             axum::routing::post(admin::add_user).get(admin::list_users),
+        )
+        .route(
+            "/admin/v1/apps/{id}/groups",
+            axum::routing::post(admin::create_group).get(admin::list_groups),
+        )
+        .route(
+            "/admin/v1/apps/{id}/groups/{name}",
+            axum::routing::get(admin::get_group).delete(admin::delete_group),
+        )
+        .route(
+            "/admin/v1/apps/{id}/groups/{name}/members",
+            axum::routing::post(admin::add_group_member),
+        )
+        .route(
+            "/admin/v1/apps/{id}/groups/{name}/members/{user_id}",
+            axum::routing::delete(admin::remove_group_member),
         )
         .route("/admin/v1/audit", axum::routing::get(admin::list_audit))
         .route("/admin/v1/backups/run", axum::routing::post(admin::backup_run))

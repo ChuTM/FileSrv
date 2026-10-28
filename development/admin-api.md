@@ -54,6 +54,36 @@ assets.
 | GET | `/admin/v1/apps/{id}/usage` | `usage_bytes / quota_bytes / file_count / active_token_count` |
 | POST | `/admin/v1/apps/{id}/users` | Pre-provision a user: `{"user_id": "..."}` (`INSERT OR IGNORE`) |
 | GET | `/admin/v1/apps/{id}/users` | List pre-provisioned users of the app |
+| POST | `/admin/v1/apps/{id}/groups` | Create a group: `{"name": "..."}` (empty membership) |
+| GET | `/admin/v1/apps/{id}/groups` | List groups (each with its members) |
+| GET | `/admin/v1/apps/{id}/groups/{name}` | Group detail + members |
+| DELETE | `/admin/v1/apps/{id}/groups/{name}` | Delete a group |
+| POST | `/admin/v1/apps/{id}/groups/{name}/members` | Add member: `{"user_id": "..."}` |
+| DELETE | `/admin/v1/apps/{id}/groups/{name}/members/{user_id}` | Remove member |
+
+### User groups
+
+Groups let the operator grant access by membership instead of listing every
+`user_id` in each file ACL. A file ACL rule may reference a group as
+`g:<group>` (e.g. `{"action":"read","add":["g:eng"]}`) — any registered user who
+is a member of that group is then allowed for that action. Group members are
+managed through the admin API above; a group is scoped to one app.
+
+Rules:
+- Group name: `1..=64` chars, no `/`, `\` or spaces; unique per app.
+- Adding an existing member is idempotent; removing a missing member is a no-op.
+- Deleting a group does **not** rewrite existing file ACLs — a `g:<name>`
+  reference to a deleted group simply matches nothing (users lose that access).
+- Membership does **not** grant the user JWT validity on its own; a user must
+  still be registered in `app_users` (see `/apps/{id}/users`) before their
+  user-context JWT is accepted.
+
+```json
+// create group
+POST /admin/v1/apps/{id}/groups   {"name": "eng"}
+// add member
+POST /admin/v1/apps/{id}/groups/eng/members   {"user_id": "alice"}
+```
 
 ### Create request
 

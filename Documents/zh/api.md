@@ -79,7 +79,7 @@ JWT。任何在請求 body／header 中攜帶的 `user_id` 都會被忽略並覆
 }
 ```
 
-- `"*"` = 所有人；`group:{name}` = 群組；**`deny` 優先於任何 allow。**
+- `"*"` = 所有人；`g:<group>` = 該群組的任一成員；**`deny` 優先於任何 allow。**
 - **繼承**：無顯式 ACL 的檔案繼承自其資料夾 → 上層 → app 預設；**`deny` 沿
   整個鏈累積，檔案的顯式 ACL 無法覆寫繼承而來的 deny**；owner 預設保有
   存取權，除非被 deny。
@@ -287,7 +287,34 @@ Soft-delete：設墓碑（`deleted_at`），立即釋放該 app 的儲存用量�
 
 ---
 
-## 9. App 自助導出
+## 9. 群組 API（由 app 管理）
+
+群組讓 app 用「成員身分」統一授權，而不必在每個檔案的 ACL 逐一列出
+`user_id`。由 **app 級身份**（`X-App-Key` + HMAC）管理；**使用者 JWT 不可**管理
+群組。檔案或資料夾的 ACL 規則可用 `g:<群組名>` 引用（見 §3）——該群組的
+任一已登記使用者即對該動作放行。
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| POST | `/v1/groups` | 建立群組：`{"name": "..."}`（空成員） |
+| GET | `/v1/groups` | 列出此 app 的群組（含成員） |
+| GET | `/v1/groups/{name}` | 群組詳情＋成員 |
+| DELETE | `/v1/groups/{name}` | 刪除群組 |
+| POST | `/v1/groups/{name}/members` | 加成員：`{"user_id": "..."}` |
+| DELETE | `/v1/groups/{name}/members/{user_id}` | 移除成員 |
+
+規則：
+- 群組名：`1..=64` 字元，不可含 `/`、`\` 或空格；每個 app 內唯一。
+- 加既有成員為冪等；移除不存在的成員為無操作。
+- 刪除群組**不會**改寫既有 ACL——指向已刪群組的 `g:<name>` 引用自然不匹配
+  （該訪問權即失效）。
+- 成員身分**不**等同 JWT 有效；使用者仍須先登記於 `app_users`（admin API
+  `/apps/{id}/users`），其 JWT 才會被接受。
+- 群組按 app 隔離：一個 app 只能管理自己的群組。
+
+---
+
+## 10. App 自助導出
 
 ### `POST /v1/apps/export`
 
@@ -317,7 +344,7 @@ Response `202`：
 
 ---
 
-## 10. 限流與配額
+## 11. 限流與配額
 
 - **儲存配額** `quota_bytes`（app 層）與 `max_payload_bytes`（單檔）—
   原子性執行；超配額 → `429 quota_exceeded`。
@@ -332,7 +359,7 @@ Response `202`：
 
 ---
 
-## 11. 錯誤碼表
+## 12. 錯誤碼表
 
 | 狀態 | code | 情境 |
 |---|---|---|
@@ -350,7 +377,7 @@ Response `202`：
 
 ---
 
-## 12. 靜態加密與金鑰策略
+## 13. 靜態加密與金鑰策略
 
 Blob 預設靜態加密（`TENANT_FS_ENCRYPT_BLOBS=true`）。每個 blob 是自足的
 封包：
@@ -379,7 +406,7 @@ Blob 預設靜態加密（`TENANT_FS_ENCRYPT_BLOBS=true`）。每個 blob 是自
 
 ---
 
-## 13. 附錄：上傳呼叫範例（curl）
+## 14. 附錄：上傳呼叫範例（curl）
 
 App 層上傳：
 

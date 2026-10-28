@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>File Storage Service · Sign in</title>
+<link rel="stylesheet" href="style.css?v=3">
+</head>
+<body data-page="login">
+
+<!-- Login view: standalone page (not part of the app shell) -->
+<div id="view-login" class="login-wrap">
+  <div class="login-stage">
+    <div class="color-blocks" aria-hidden="true">
+      <div class="block block-1"></div>
+      <div class="block block-2"></div>
+      <div class="block block-3"></div>
+      <div class="block block-4"></div>
+      <div class="block block-5"></div>
+    </div>
+
+    <div class="login-side">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <p class="brand-name">File Storage Service</p>
+          <p class="brand-sub">Admin Console</p>
+        </div>
+      </div>
+
+      <div class="title-block">
+        <h2>Sign in</h2>
+        <p>Admin Console · loopback access only</p>
+      </div>
+
+      <form id="login-form" class="login-form" autocomplete="off">
+        <label for="login-token">Admin Token</label>
+        <input class="glass" id="login-token" type="password" required spellcheck="false"
+               autocapitalize="off" autocomplete="off" placeholder="Paste TENANT_FS_ADMIN_TOKEN">
+        <p id="login-error" class="err" role="alert" hidden></p>
+        <button type="submit" class="glass-btn btn btn-primary">Sign in</button>
+        <p class="login-note">Enter the ADMIN_TOKEN from your environment variables.</p>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="gsap.min.js?v=3" defer></script>
+<script src="app.js?v=16" defer></script>
+</body>
+</html>

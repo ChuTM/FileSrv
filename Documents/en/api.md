@@ -85,7 +85,7 @@ unique within the app.
 }
 ```
 
-- `"*"` = everyone; `group:{name}` = a group; **`deny` wins over every allow.**
+- `"*"` = everyone; `g:<group>` = every member of that group; **`deny` wins over every allow.**
 - **Inheritance**: a file with no explicit ACL inherits from its folder →
   ancestors → app default; **`deny` is collected across the whole chain and a
   file's explicit ACL cannot override an inherited deny**; the owner keeps
@@ -307,7 +307,35 @@ Success → `204`.
 
 ---
 
-## 9. App self-export
+## 9. Groups API (app-managed)
+
+Groups let the app manage access by membership instead of listing every
+`user_id` in each file ACL. Managed with **app-level credentials**
+(`X-App-Key` + HMAC); user JWTs are **not** allowed to manage groups. A file or
+folder ACL rule may reference a group as `g:<name>` (see §3) — any registered
+user who is a member of that group is then allowed for that action.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/v1/groups` | Create a group: `{"name": "..."}` (empty membership) |
+| GET | `/v1/groups` | List this app's groups (each with members) |
+| GET | `/v1/groups/{name}` | Group detail + members |
+| DELETE | `/v1/groups/{name}` | Delete a group |
+| POST | `/v1/groups/{name}/members` | Add member: `{"user_id": "..."}` |
+| DELETE | `/v1/groups/{name}/members/{user_id}` | Remove member |
+
+Rules:
+- Group name: `1..=64` chars, no `/`, `\` or spaces; unique per app.
+- Adding an existing member is idempotent; removing a missing member is a no-op.
+- Deleting a group does **not** rewrite existing ACLs — a `g:<name>` reference
+  to a deleted group matches nothing (users lose that access).
+- Membership does **not** grant JWT validity; a user must still be registered
+  in `app_users` (admin API `/apps/{id}/users`) before their JWT is accepted.
+- Groups are scoped per app: an app can only manage its own groups.
+
+---
+
+## 10. App self-export
 
 ### `POST /v1/apps/export`
 
@@ -340,7 +368,7 @@ maintenance loop.
 
 ---
 
-## 10. Limits and quotas
+## 11. Limits and quotas
 
 - **Storage quota** `quota_bytes` (app level) and `max_payload_bytes`
   (per file) — enforced atomically; over quota → `429 quota_exceeded`.
@@ -356,7 +384,7 @@ maintenance loop.
 
 ---
 
-## 11. Error codes
+## 12. Error codes
 
 | Status | code | Situation |
 |---|---|---|
@@ -374,7 +402,7 @@ maintenance loop.
 
 ---
 
-## 12. Static encryption and key policy
+## 13. Static encryption and key policy
 
 Blobs are encrypted at rest by default (`TENANT_FS_ENCRYPT_BLOBS=true`). Each
 blob is a self-contained envelope:
@@ -407,7 +435,7 @@ blob is a self-contained envelope:
 
 ---
 
-## 13. Appendix: upload example (curl)
+## 14. Appendix: upload example (curl)
 
 App-level upload:
 

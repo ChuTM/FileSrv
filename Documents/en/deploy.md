@@ -1,4 +1,4 @@
-# Deployment Guide — tenant-fs-server
+# Deployment Guide — filesrv
 
 > This is the English version. 中文（繁體）版見 [`/zh/deploy.md`](../zh/deploy.md).
 > Target: a Linux server (Debian/Ubuntu shown). macOS-only instructions are
@@ -41,7 +41,7 @@ cargo --version && sqlite3 --version && rsync --version && openssl version
 ```bash
 cd /opt/rust-file-server          # or wherever you keep the source
 cargo build --release
-# binary: target/release/tenant-fs-server
+# binary: target/release/filesrv
 ```
 
 Run as a dedicated non-root user (example: `useradd -r -s /usr/sbin/nologin tenantfs`).
@@ -102,7 +102,7 @@ Create `/etc/systemd/system/tenant-fs.service`:
 
 ```ini
 [Unit]
-Description=tenant-fs-server
+Description=filesrv
 After=network.target
 
 [Service]
@@ -111,7 +111,7 @@ User=tenantfs
 WorkingDirectory=/opt/rust-file-server
 # Load all settings from .env — no Environment= lines needed.
 EnvironmentFile=/opt/rust-file-server/.env
-ExecStart=/opt/rust-file-server/target/release/tenant-fs-server
+ExecStart=/opt/rust-file-server/target/release/filesrv
 Restart=on-failure
 # harden
 NoNewPrivileges=true

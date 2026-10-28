@@ -163,7 +163,7 @@ fn run_backup_inner(
     let manifest = serde_json::json!({
         "backup_id": backup_id,
         "created_at": now,
-        "server": "tenant-fs-server",
+        "server": "filesrv",
         "note": "Blobs are envelope-encrypted; SERVER_SECRET and all key material \
                  stay in the deployment environment and are NOT included.",
         "files": files.iter().map(|(name, size, sha)| serde_json::json!({

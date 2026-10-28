@@ -75,14 +75,24 @@ impl Acl {
     }
 }
 
-fn match_subject(list: &[String], subject: &str) -> bool {
-    list.iter().any(|s| s == subject || s == "*")
+fn match_subject(list: &[String], subject: &str, groups: &[String]) -> bool {
+    list.iter().any(|s| {
+        if s == subject || s == "*" {
+            return true;
+        }
+        // "g:<name>" matches any user who is a member of that group.
+        if let Some(g) = s.strip_prefix("g:") {
+            return groups.iter().any(|m| m == g);
+        }
+        false
+    })
 }
 
 /// Evaluate an ACL for one subject (user_id) and action.
 /// deny wins; owner allowed by default; otherwise allow-list / public read.
-pub fn evaluate_acl(acl: &Acl, subject: &str, action: Action) -> bool {
-    if match_subject(&acl.deny, subject) {
+/// Group references are resolved against `groups` (empty = pure user_id / `*`).
+pub fn evaluate_acl_with_groups(acl: &Acl, subject: &str, groups: &[String], action: Action) -> bool {
+    if match_subject(&acl.deny, subject, groups) {
         return false;
     }
     if !acl.owner.is_empty() && acl.owner == subject {
@@ -91,13 +101,18 @@ pub fn evaluate_acl(acl: &Acl, subject: &str, action: Action) -> bool {
     if action == Action::ManageAcl {
         return false;
     }
-    if match_subject(acl.action_list(action), subject) {
+    if match_subject(acl.action_list(action), subject, groups) {
         return true;
     }
     if action == Action::Read && acl.public_read {
         return true;
     }
     false
+}
+
+/// Group-less evaluation (subject has no group memberships).
+pub fn evaluate_acl(acl: &Acl, subject: &str, action: Action) -> bool {
+    evaluate_acl_with_groups(acl, subject, &[], action)
 }
 
 /// Effective ACL for a file: allow rules come from the file's own explicit
@@ -184,9 +199,13 @@ fn is_empty_allow(a: &Acl) -> bool {
 }
 
 /// Authorize a user subject against a file for a given action (deny-by-default).
+/// Resolves `g:<group>` ACL references against the subject's group memberships.
 pub fn can_user_access_file(conn: &Connection, file: &FileRow, user: &str, action: Action) -> bool {
     match effective_acl(conn, file) {
-        Ok(acl) => evaluate_acl(&acl, user, action),
+        Ok(acl) => {
+            let groups = db::user_group_names(conn, file.app_id, user).unwrap_or_default();
+            evaluate_acl_with_groups(&acl, user, &groups, action)
+        }
         Err(_) => false, // fail-closed
     }
 }
@@ -258,5 +277,44 @@ mod tests {
         assert!(!evaluate_acl(&a, "u_reader", Action::Write));
         assert!(evaluate_acl(&a, "u_writer", Action::Write));
         assert!(!evaluate_acl(&a, "u_writer", Action::Delete));
+    }
+
+    #[test]
+    fn group_acl_reference() {
+        let acl = Acl {
+            owner: "u_owner".into(),
+            read: vec!["g:eng".into()],
+            ..Default::default()
+        };
+        let eng = vec!["eng".to_string()];
+        // Member of the referenced group is allowed to read.
+        assert!(evaluate_acl_with_groups(&acl, "alice", &eng, Action::Read));
+        // Someone not in the group (or with no group context) is denied.
+        assert!(!evaluate_acl_with_groups(&acl, "bob", &[], Action::Read));
+        assert!(!evaluate_acl_with_groups(&acl, "alice", &eng, Action::Write));
+    }
+
+    #[test]
+    fn group_deny_beats_group_allow() {
+        let acl = Acl {
+            owner: "u_owner".into(),
+            read: vec!["g:eng".into()],
+            deny: vec!["g:eng".into()],
+            ..Default::default()
+        };
+        let eng = vec!["eng".to_string()];
+        assert!(!evaluate_acl_with_groups(&acl, "alice", &eng, Action::Read));
+    }
+
+    #[test]
+    fn group_and_userid_mixed() {
+        let acl = Acl {
+            owner: "u_owner".into(),
+            read: vec!["g:eng".into(), "u_special".into()],
+            ..Default::default()
+        };
+        let eng = vec!["eng".to_string()];
+        assert!(evaluate_acl_with_groups(&acl, "alice", &eng, Action::Read));
+        assert!(evaluate_acl_with_groups(&acl, "u_special", &[], Action::Read));
     }
 }

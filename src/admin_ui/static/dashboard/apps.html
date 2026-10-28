@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>File Storage Service · Apps</title>
+<link rel="stylesheet" href="/admin/dashboard.css?v=9">
+</head>
+<body data-page="apps">
+
+<div id="app-shell" class="shell">
+  <aside id="sidebar" class="sidebar">
+    <div class="side-brand"><span>File Storage Service</span></div>
+    <nav class="side-nav">
+      <a class="nav-item active" href="/dashboard/apps"><span class="nav-ico" data-icon="apps"></span>Apps</a>
+      <a class="nav-item" href="/dashboard/audit"><span class="nav-ico" data-icon="audit"></span>Audit Log</a>
+      <a class="nav-item" href="/dashboard/backup"><span class="nav-ico" data-icon="backup"></span>Backup</a>
+      <a class="nav-item" href="/dashboard/archive"><span class="nav-ico" data-icon="archive"></span>Archive</a>
+    </nav>
+    <div class="side-foot">
+      <a class="btn btn-ghost btn-block" href="/dashboard/settings"><span class="nav-ico" data-icon="settings"></span>Settings</a>
+      <button id="btn-logout" class="btn btn-ghost btn-block">Sign out</button>
+    </div>
+  </aside>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="btn-menu" class="icon-btn" aria-label="Toggle menu"><span data-icon="menu"></span></button>
+        <h2 class="view-title">Apps</h2>
+      </div>
+      <div class="topbar-actions">
+        <button id="btn-create-app" class="btn btn-primary">Create App</button>
+      </div>
+    </header>
+    <p id="global-error" class="banner banner-error" role="alert" hidden></p>
+
+    <section id="view-apps" class="view">
+      <div class="table-card">
+        <div id="apps-table-wrap" class="table-wrap"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+
+<script src="/admin/gsap.min.js?v=4" defer></script>
+<script src="/admin/app.js?v=16" defer></script>
+</body>
+</html>

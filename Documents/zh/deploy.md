@@ -1,4 +1,4 @@
-# 部署指南 — tenant-fs-server
+# 部署指南 — filesrv
 
 > 本頁為繁體中文版。English version: [`/en/deploy.md`](../en/deploy.md).
 > 目標：Linux 伺服器（以 Debian/Ubuntu 為例）。刻意不包含 macOS 專屬指令。
@@ -37,7 +37,7 @@ cargo --version && sqlite3 --version && rsync --version && openssl version
 ```bash
 cd /opt/rust-file-server          # 或存放原始碼的位置
 cargo build --release
-# 執行檔：target/release/tenant-fs-server
+# 執行檔：target/release/filesrv
 ```
 
 以專屬非 root 使用者執行（例：`useradd -r -s /usr/sbin/nologin tenantfs`）。
@@ -95,7 +95,7 @@ nano .env                         # 檢視 / 編輯每個設定
 
 ```ini
 [Unit]
-Description=tenant-fs-server
+Description=filesrv
 After=network.target
 
 [Service]
@@ -104,7 +104,7 @@ User=tenantfs
 WorkingDirectory=/opt/rust-file-server
 # 由 .env 載入所有設定 — 不需 Environment= 逐行。
 EnvironmentFile=/opt/rust-file-server/.env
-ExecStart=/opt/rust-file-server/target/release/tenant-fs-server
+ExecStart=/opt/rust-file-server/target/release/filesrv
 Restart=on-failure
 # 加固
 NoNewPrivileges=true

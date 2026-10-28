@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# tenant-fs-server — whole-data-directory snapshot backup (the simplest option)
+# filesrv — whole-data-directory snapshot backup (the simplest option)
 #
 # Synchronizes the entire data/ tree (SQLite DB + all sharded blob files) to a
 # given destination. Restore = stop the server -> put the backup back into
@@ -30,6 +30,9 @@ DATA_DIR="$(pwd)/data"
 SECRET_OUT=""
 VERIFY=1
 DEST=""
+ENV_SRC=""
+ENV_OUT=""
+INCLUDE_ENV=1
 
 usage() {
   cat <<'EOF'
@@ -40,11 +43,25 @@ Options:
   --data <dir>            data directory path (default: ./data under cwd)
   --secret-out <file>     also save SERVER_SECRET to <file> (chmod 600, kept
                           OUTSIDE the backup media)
+  --env <file>            .env file to back up (default: <data-parent>/.env,
+                          or the one at the project root next to this script)
+  --env-out <file>        copy the .env file to <file> (chmod 600, kept OUTSIDE
+                          the backup media) — the recommended way to back up
+                          .env so credentials never leave the deployment
+  --include-env           copy the .env file INTO the backup destination
+                          (<dest>/.env) — ON by default, for the simplest
+                          one-dir restore. Only safe when the backup media is
+                          trusted/encrypted, because .env holds SERVER_SECRET
+                          and ADMIN_TOKEN
+  --no-env                do NOT copy .env into the backup destination
+                          (use --env-out / --secret-out for the credentials)
   --no-verify             skip SQLite integrity_check of the backup copy
   -h, --help              show this help
 
 Examples:
   ./backup.sh /Volumes/Backup/tenant-fs --data ./data
+  ./backup.sh /backup/tenant-fs --env-out ~/.secrets/tenant-fs.env     # .env separate
+  ./backup.sh /backup/tenant-fs --no-env                               # .env not in media
   ./backup.sh /backup/tenant-fs --secret-out ~/.secrets/tenant-fs.server_secret
 EOF
   exit 0
@@ -58,6 +75,16 @@ while [[ $# -gt 0 ]]; do
     --secret-out)
       [[ $# -ge 2 ]] || { echo "error: --secret-out requires a value" >&2; usage; }
       SECRET_OUT="$2"; shift 2 ;;
+    --env)
+      [[ $# -ge 2 ]] || { echo "error: --env requires a value" >&2; usage; }
+      ENV_SRC="$2"; shift 2 ;;
+    --env-out)
+      [[ $# -ge 2 ]] || { echo "error: --env-out requires a value" >&2; usage; }
+      ENV_OUT="$2"; shift 2 ;;
+    --include-env)
+      INCLUDE_ENV=1; shift ;;
+    --no-env)
+      INCLUDE_ENV=0; shift ;;
     --no-verify)
       VERIFY=0; shift ;;
     -h|--help)
@@ -136,14 +163,59 @@ if [[ -n "$SECRET_OUT" ]]; then
   fi
 fi
 
+# ---- 4.5) back up the .env file (credentials + settings) ----
+# The .env file holds SERVER_SECRET, ADMIN_TOKEN and other settings. Backing it
+# up is REQUIRED for a byte-perfect restore, but it must never leak. Two modes:
+#   --env-out  -> copy to a separate, trusted location (recommended)
+#   --include-env -> copy INSIDE the backup media (simplest restore, but only if
+#                    the media itself is trusted/encrypted)
+if [[ -z "$ENV_SRC" ]]; then
+  ENV_SRC="$(dirname "$DATA_DIR")/.env"
+fi
+ENV_SRC_ABS="$(cd "$(dirname "$ENV_SRC")" 2>/dev/null && pwd)/$(basename "$ENV_SRC")"
+ENV_EXISTS=0
+[[ -f "$ENV_SRC_ABS" ]] && ENV_EXISTS=1
+if [[ "$ENV_EXISTS" != "1" ]]; then
+  echo "!! no .env file found at $ENV_SRC_ABS; .env will not be backed up." >&2
+fi
+if [[ "$INCLUDE_ENV" == "1" ]]; then
+  if [[ "$ENV_EXISTS" == "1" ]]; then
+    cp "$ENV_SRC_ABS" "$DEST/.env"
+    chmod 600 "$DEST/.env"
+    echo "==> .env copied INTO the backup media: $DEST/.env (mode 600)"
+    echo "    WARNING: .env holds SERVER_SECRET and ADMIN_TOKEN. Keep the media trusted/encrypted."
+  else
+    echo "!! --include-env given but no .env exists; skipping." >&2
+  fi
+fi
+if [[ -n "$ENV_OUT" ]]; then
+  if [[ "$ENV_EXISTS" == "1" ]]; then
+    mkdir -p "$(dirname "$ENV_OUT")"
+    cp "$ENV_SRC_ABS" "$ENV_OUT"
+    chmod 600 "$ENV_OUT"
+    echo "==> .env saved separately to ${ENV_OUT} (mode 600, outside the backup media)"
+  else
+    echo "!! --env-out given but no .env exists; skipping." >&2
+  fi
+fi
+
 # ---- 5) write the manifest ----
 MANIFEST="$DEST/backup-manifest.txt"
 {
-  echo "tenant-fs-server whole-directory snapshot backup"
+  echo "filesrv whole-directory snapshot backup"
   echo "time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   echo "source: $DATA_DIR"
   echo "destination: $DEST"
   echo "excluded: backups/ blobs/dec_cache/ blobs/exports/ blobs/tmp_*"
+  echo "env: $ENV_SRC_ABS"
+  if [[ "$INCLUDE_ENV" == "1" ]]; then
+    echo "env-in-backup: yes (.env stored inside this backup media)"
+  else
+    echo "env-in-backup: no"
+  fi
+  if [[ -n "$ENV_OUT" ]]; then
+    echo "env-out: $ENV_OUT (separate trusted location)"
+  fi
   echo "note: SERVER_SECRET is not stored in the backup media; restoring requires"
   echo "      the SAME SERVER_SECRET that produced this backup."
 } > "$MANIFEST"

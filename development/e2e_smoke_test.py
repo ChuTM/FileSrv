@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live end-to-end smoke test for tenant-fs-server (real sockets, ports 18080/18081).
+"""Live end-to-end smoke test for filesrv (real sockets, ports 18080/18081).
 
 Reproduces the README's 18-check smoke test plus additional security probes:
 X-Forwarded-For spoofing against IP-bound share tokens (must be IGNORED by

@@ -244,6 +244,42 @@ pub fn blob_decrypt(server_secret: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Re-seal a blob's DEK from `old_secret` to `new_secret`, WITHOUT touching the
+/// payload. This is the efficient way to rotate SERVER_SECRET: the per-blob DEK
+/// and the body ciphertext are unchanged; only the KEK-wrapped DEK in the header
+/// is re-encrypted. Returns the fully re-keyed envelope, or None if the blob is
+/// not a valid v1 envelope (legacy plaintext blobs are skipped by the caller).
+pub fn blob_rekey(old_secret: &[u8], new_secret: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    if blob.len() < BLOB_HEADER_LEN || !looks_like_encrypted_blob(&blob[..5]) {
+        return None;
+    }
+    let dek_nonce = &blob[5..17];
+    let wrapped = &blob[17..65];
+    let dek = Aes256Gcm::new_from_slice(&kek(old_secret))
+        .ok()?
+        .decrypt(Nonce::from_slice(dek_nonce), wrapped)
+        .ok()?;
+    if dek.len() != DEK_LEN {
+        return None;
+    }
+    let mut new_dek_nonce = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut new_dek_nonce);
+    let new_wrapped = Aes256Gcm::new_from_slice(&kek(new_secret))
+        .expect("32-byte KEK")
+        .encrypt(Nonce::from_slice(&new_dek_nonce), &dek[..])
+        .expect("seal dek");
+
+    let mut out = Vec::with_capacity(blob.len());
+    out.extend_from_slice(BLOB_MAGIC);
+    out.push(BLOB_VERSION);
+    out.extend_from_slice(&new_dek_nonce);
+    out.extend_from_slice(&new_wrapped);
+    out.extend_from_slice(&blob[65..]); // body_nonce + ciphertext, unchanged
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +345,28 @@ mod tests {
         // Truncated -> rejected
         let env = blob_encrypt(b"server-secret", pt);
         assert!(blob_decrypt(b"server-secret", &env[..env.len() - 5]).is_none());
+    }
+
+    #[test]
+    fn blob_rekey_reopenable_and_preserves_body() {
+        let pt = b"rotate me but keep the bytes identical";
+        let env = blob_encrypt(b"old-secret", pt);
+        // wrong old secret -> None
+        assert!(blob_rekey(b"wrong", b"new", &env).is_none());
+        // legacy plaintext -> None
+        assert!(blob_rekey(b"old-secret", b"new", b"plaintext legacy").is_none());
+
+        let rekeyed = blob_rekey(b"old-secret", b"new-secret", &env).unwrap();
+        // still a valid envelope, still opens with the NEW secret
+        assert!(looks_like_encrypted_blob(&rekeyed));
+        assert_eq!(blob_decrypt(b"new-secret", &rekeyed).unwrap(), pt);
+        // old secret no longer opens it
+        assert!(blob_decrypt(b"old-secret", &rekeyed).is_none());
+        // the body ciphertext region is byte-for-byte unchanged
+        assert_eq!(&rekeyed[65..], &env[65..]);
+        // twice re-keyed (new -> newer) also works
+        let again = blob_rekey(b"new-secret", b"newest", &rekeyed).unwrap();
+        assert_eq!(blob_decrypt(b"newest", &again).unwrap(), pt);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [package]
-name = "tenant-fs-server"
+name = "filesrv"
 version = "0.1.0"
 edition = "2021"
 description = "Multi-tenant / multi-app isolated file storage server (Rust/Axum)"
