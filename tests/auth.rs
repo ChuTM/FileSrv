@@ -125,6 +125,7 @@ async fn xff_spoof_is_ignored_by_default() {
         &key,
         &secret,
         file_id,
+        "u1",
         json!({"scope": "share", "allowed_ip": "203.0.113.45"}),
     )
     .await;

@@ -172,11 +172,34 @@ blob、不會重複扣配額。窗口到期後該 key 被遺忘，視為全新�
 }
 ```
 
+**每個連結都歸屬於一個 acting user。** 使用 user-context JWT 時 acting user
+即為 JWT 主體。使用 **app 身份時必須額外指定要為誰鑄造連結** — 透過
+`X-User-Id` header（與上傳相同）或 body 的 `user_id` 欄位；缺漏回傳 `400`。
+
+**下載連結是讀取能力，並執行讀取 ACL。** acting user 必須對該檔案持有
+**Read**（`GET /v1/files/:id` ACL 模型：owner 預設具備 read；其餘 `read`
+授權來自 ACL 清單）；僅有 write／其他授權不足以取得下載權，無讀取權限時
+回傳 `403`。連結本身仍為 bearer token：一旦鑄造，下載端點驗證的是 token
+而非使用者。
+
 - `scope: "embed"`：**冪等** — 相同（file, user, scope）回傳**相同** token，
-  TTL 自首次鑄造起固定，重新整理不會延長。對 user JWT 以請求者為鍵（app
-  身份時回退至檔案 owner）。
+  TTL 自首次鑄造起固定，重新整理不會延長。以 acting user 為鍵（authority
+  授權時以檔案 owner 為鍵）。
 - `scope: "share"`：一次性分享 — 每次鑄造新 token，可選綁定 `allowed_ip`。
 - 伺服器會重讀檔案、重跑 ACL、deny-by-default；`file_id` 不在目前 app → `404`。
+
+### Authority 標記（`#Authority-...`）
+
+對真正系統層級的操作，app 可**跳過逐使用者 ACL 檢查**來鑄造連結：把 acting
+user 設為 `#Authority-<sha256(app_secret)>`（經由 `X-User-Id` 或 body
+`user_id`）。此標記僅在 **app 身份**下被識別，並以 app 自身密鑰驗證，
+因此任意字串都無法偽裝成 app。鑄造出的 token 綁定至**檔案 owner**。
+`sha256` 為 app 明文密鑰的 lowercase hex digest。
+
+> **建議**：即使我們完全信任 app，仍應把 ACL 檢查視為額外的一層防護，
+> **日常按使用者下載請一律傳真實 `user_id`**。`#Authority-…` 保留給真正
+> 全域性的操作（遷移、系統腳本、跨租戶工具），**不要**用於一般員工／客戶
+> 的下載 — 真實 user id 讓每個連結可歸因、可逐使用者撤銷。
 
 Response `200`：
 

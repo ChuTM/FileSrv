@@ -1,4 +1,5 @@
 use crate::authz::{self, Action, Identity};
+use crate::crypto;
 use crate::db::{self};
 use crate::error::{ApiError, ApiResult};
 use crate::ratelimit;
@@ -45,26 +46,72 @@ pub async fn generate_link(AxState(st): AxState<AppState>, req: Request<Body>) -
 
     let file = load_app_file(&st, file_id, app_id)?;
 
-    // Permission: App identity (tenant) or user with Read on the file.
-    match &identity {
-        Identity::App(_) => {}
+    // Acting user for link generation. App identity MUST carry an explicit
+    // user context (body `user_id` or `X-User-Id`) so every link is attributed
+    // and checked against the file ACL — a defense-in-depth layer even though
+    // the app is trusted. The reserved authority marker grants full tenant
+    // control for genuinely system-level operations; routine per-user access
+    // should always pass a real user_id instead (see docs).
+    let acting_user: Option<String> = body
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            ctx.headers
+                .get("x-user-id")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+        })
+        .filter(|s| !s.is_empty());
+
+    // Authority marker `#Authority-<sha256(app_secret)>`: recognized only for
+    // app identity and verified against the app's own secret, so an arbitrary
+    // user_id string can never masquerade as the app. Bypasses the per-user
+    // ACL check; the token binds to the file owner.
+    let authority = match &identity {
+        Identity::App(_) => match acting_user.as_deref().and_then(|s| s.strip_prefix("#Authority-")) {
+            Some(marker) => {
+                let conn = st.db.lock().unwrap();
+                let app = db::app_by_id(&conn, app_id)?
+                    .ok_or_else(|| ApiError::not_found("App not found."))?;
+                let secret = crypto::open(st.cfg.server_secret.as_bytes(), &app.secret_sealed)
+                    .ok_or_else(|| ApiError::forbidden("Invalid authority marker."))?;
+                marker == crypto::sha256(&secret)
+            }
+            None => false,
+        },
+        _ => false,
+    };
+
+    // Permission: the acting user needs Read on the file (downloads are a read
+    // capability; write/other grants never suffice). Authority bypasses.
+    let grant_user: String = match &identity {
+        Identity::App(_) => {
+            let user = acting_user.clone().ok_or_else(|| {
+                ApiError::bad_request(
+                    "user_id (or X-User-Id header) is required for app-scoped link generation.",
+                )
+            })?;
+            if authority {
+                file.owner.clone()
+            } else {
+                let conn = st.db.lock().unwrap();
+                if !authz::can_user_access_file(&conn, &file, &user, Action::Read) {
+                    return Err(ApiError::forbidden("Permission denied."));
+                }
+                user
+            }
+        }
         Identity::User { user_id, .. } => {
             let conn = st.db.lock().unwrap();
             if !authz::can_user_access_file(&conn, &file, user_id, Action::Read) {
                 return Err(ApiError::forbidden("Permission denied."));
             }
+            user_id.clone()
         }
         _ => return Err(ApiError::forbidden("Token generation not allowed.")),
-    }
-
-    // Embed tokens are idempotent per (file, user, scope): key them on the
-    // requesting user (JWT) so two readers of the same file don't collide on
-    // one token; app-level identity has no user context, so fall back to the
-    // file owner (spec §5.8 of the test report).
-    let embed_user = match &identity {
-        Identity::User { user_id, .. } => user_id.clone(),
-        _ => file.owner.clone(),
     };
+    let embed_user = grant_user.clone();
     let (token, reused) = match scope {
         "embed" => tokens::generate_embed(&st.db, &st.cfg, app_id, file_id, &embed_user, ttl),
         "share" => (

@@ -17,12 +17,12 @@ async fn cross_tenant_isolation() {
     let (s, v) = upload_bytes(&ctx, &key_a, &secret_a, "u_a", b"app-a-secret", "").await;
     assert_eq!(s, StatusCode::OK);
     let file_a = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx, &key_a, &secret_a, file_a, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key_a, &secret_a, file_a, "u_a", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token_a = v["token"].as_str().unwrap().to_string();
 
     // App B cannot generate a link for A's file (404 hides existence)
-    let (s, v) = generate_link(&ctx, &key_b, &secret_b, file_a, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key_b, &secret_b, file_a, "u_b", json!({})).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
 
     // App B cannot read A's file meta
@@ -54,7 +54,7 @@ async fn delete_file_frees_usage_and_tokens() {
     let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"delete-me", "").await;
     assert_eq!(s, StatusCode::OK);
     let file_id = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
 
@@ -67,7 +67,7 @@ async fn delete_file_frees_usage_and_tokens() {
 
     let (s, _) = download(&ctx, &token, &[]).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, _) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, _) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     let (s, v) = json_of(send(&ctx.admin, admin_req("GET", "/admin/v1/apps/1/usage", Value::Null)).await).await;
@@ -84,7 +84,7 @@ async fn soft_delete_lifecycle_grace_then_purge() {
     assert_eq!(s, StatusCode::OK);
     let file_id = v["file_id"].as_i64().unwrap();
     let uuid = v["storage_uuid"].as_str().unwrap().to_string();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
     // Warm the download path (materializes the decrypted cache entry)

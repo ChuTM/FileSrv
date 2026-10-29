@@ -20,13 +20,13 @@ async fn upload_download_embed_idempotent_revoke() {
     let file_id = v["file_id"].as_i64().unwrap();
     assert_eq!(v["owner"], json!("u1"));
 
-    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let token1 = v["token"].as_str().unwrap().to_string();
     assert_eq!(v["reused"], json!(false));
 
     // Idempotent within the fixed window: same token, reused=true, TTL NOT extended
-    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["token"], json!(token1));
     assert_eq!(v["reused"], json!(true));
@@ -49,7 +49,7 @@ async fn upload_download_embed_idempotent_revoke() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     // Next generate mints a NEW token
-    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &app_key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["reused"], json!(false));
     let token2 = v["token"].as_str().unwrap().to_string();
@@ -98,7 +98,7 @@ async fn encrypted_blob_read_old_write_new() {
     assert_eq!(s, StatusCode::OK, "{v}");
     let file_id = v["file_id"].as_i64().unwrap();
     let uuid = v["storage_uuid"].as_str().unwrap().to_string();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
 
@@ -207,7 +207,7 @@ async fn chunked_upload_flow_and_unauth_rejected() {
 
     // roundtrip content matches (encrypted through storage layer)
     let file_id = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK, "gen: {v}");
     let token = v["token"].as_str().unwrap().to_string();
     let (s, body) = download(&ctx, &token, &[]).await;
@@ -307,7 +307,7 @@ async fn upload_original_name_and_content_type_echoed_on_download() {
     assert_eq!(v["name"], json!("evil.sh"));
 
     // Download echoes the original name in Content-Disposition and the content type.
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let token = v["token"].as_str().unwrap().to_string();
 
@@ -337,4 +337,59 @@ async fn upload_original_name_and_content_type_echoed_on_download() {
         .to_string();
     assert_eq!(cd, r#"attachment; filename="report.pdf""#);
     assert_eq!(ct, "application/pdf");
+}
+
+#[tokio::test]
+async fn generate_link_user_scoped_read_write_and_authority() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "ACL", 1 << 20, 1 << 20).await;
+
+    // u1 uploads (owner). u2 has no ACL read.
+    let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"sec", "").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let file_id = v["file_id"].as_i64().unwrap();
+
+    // Owner can mint a link (owner has read by default).
+    let (s, _) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Non-owner without read -> 403 (a download is a read; write never suffices).
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u2", json!({})).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+
+    // Grant u2 READ only (not write), then u2 can mint a link.
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(
+                &key, &secret, "PATCH", &format!("/v1/files/{file_id}/acl"), "",
+                json!({"action": "read", "add": ["u2"]}), &[],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = generate_link(&ctx, &key, &secret, file_id, "u2", json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // App identity without an acting user -> 400 (user context required).
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": file_id}), &[]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+
+    // Correct authority marker bypasses the per-user ACL (binds to owner).
+    let marker = format!("#Authority-{}", crypto::sha256(secret.as_bytes()));
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, &marker, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // Forged authority marker cannot masquerade as the app.
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "#Authority-deadbeef", json!({})).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
 }

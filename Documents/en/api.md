@@ -184,14 +184,42 @@ mints the token).
 }
 ```
 
+**Every link is attributed to an acting user.** With a user-context JWT the
+acting user is the JWT subject. With **app identity you must now send the user
+for whom the link is minted** — either the `X-User-Id` header (same as upload)
+or a `user_id` field in the body. Omitting it returns `400`.
+
+**Download links are a read capability and enforce read ACLs.** The acting
+user must hold **Read** on the file (`GET /v1/files/:id` ACL model:
+owner has read by default; `read` grants come from the ACL list); a write /
+other grant never authorises a download. Without read access the call returns
+`403`. Links themselves stay bearer tokens: once minted, the download endpoint
+authenticates the token, not the user.
+
 - `scope: "embed"`: **idempotent** — the same (file, user, scope) returns the
   **same** token, TTL fixed from first mint, refreshing does not extend it.
-  Keyed on the requesting user for user JWTs (falls back to the file owner for
-  app identity).
+  Keyed on the acting user; for authority grants it keys on the file owner.
 - `scope: "share"`: one-time share — a new token each time, optionally bound to
   `allowed_ip`.
 - The server re-reads the file, re-runs the ACL, deny-by-default; a `file_id`
   outside the current app → `404`.
+
+### Authority marker (`#Authority-...`)
+
+For genuinely system-level operations an app can mint a link **without a
+per-user ACL check** by sending the acting user as
+`#Authority-<sha256(app_secret)>` (via `X-User-Id` or body `user_id`). The
+marker is recognised only for **app identity** and is verified against the
+app's own secret, so an arbitrary string can never masquerade as the app. The
+minted token binds to the **file owner**. `sha256` is the lowercase hex
+digest of the app's plaintext secret.
+
+> **Recommendation:** even though we fully trust the app, treat the ACL check
+> as an extra defence layer and **pass real `user_id`s for routine per-user
+> downloads**. Reserve `#Authority-…` for genuinely global operations (migration,
+> system scripts, cross-tenant tooling) and do not use it for ordinary employee /
+> customer downloads — a real user id keeps every link attributable and
+> revocable per user.
 
 Response `200`:
 

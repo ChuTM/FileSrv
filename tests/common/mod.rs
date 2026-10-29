@@ -216,7 +216,14 @@ pub async fn upload_bytes(
     .await
 }
 
-pub async fn generate_link(ctx: &TestCtx, app_key: &str, secret: &str, file_id: i64, extra: Value) -> (StatusCode, Value) {
+pub async fn generate_link(
+    ctx: &TestCtx,
+    app_key: &str,
+    secret: &str,
+    file_id: i64,
+    acting_user: &str,
+    extra: Value,
+) -> (StatusCode, Value) {
     let mut body = json!({ "file_id": file_id });
     if let Value::Object(m) = extra {
         for (k, v) in m {
@@ -226,7 +233,15 @@ pub async fn generate_link(ctx: &TestCtx, app_key: &str, secret: &str, file_id: 
     json_of(
         send(
             &ctx.public,
-            signed_req(app_key, secret, "POST", "/v1/links/generate", "", body, &[]),
+            signed_req(
+                app_key,
+                secret,
+                "POST",
+                "/v1/links/generate",
+                "",
+                body,
+                &[("x-user-id", acting_user)],
+            ),
         )
         .await,
     )

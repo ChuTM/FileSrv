@@ -15,7 +15,7 @@ async fn range_and_etag() {
     let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"0123456789", "").await;
     assert_eq!(s, StatusCode::OK);
     let file_id = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
 
@@ -54,6 +54,7 @@ async fn share_token_with_ip_binding() {
         &key,
         &secret,
         file_id,
+        "u1",
         json!({"scope": "share", "allowed_ip": "203.0.113.45"}),
     )
     .await;
@@ -75,7 +76,7 @@ async fn head_download_headers_and_404() {
     let (s, v) = upload_bytes(&ctx, &key, &secret, "u1", b"head-body-12345", "").await;
     assert_eq!(s, StatusCode::OK);
     let file_id = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
 
@@ -124,7 +125,7 @@ async fn opt_in_download_audit_writes_a_row() {
     assert_eq!(s, StatusCode::OK, "{v}");
     let fid = v["file_id"].as_i64().unwrap();
     let (s, v) = json_of(
-        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": fid}), &[])).await,
+        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": fid}), &[("x-user-id", "u1")])).await,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -193,7 +194,7 @@ async fn download_rate_limited_per_app() {
     assert_eq!(s, StatusCode::OK, "{v}");
     let fid = v["file_id"].as_i64().unwrap();
     let (s, v) = json_of(
-        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({ "file_id": fid }), &[])).await,
+        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({ "file_id": fid }), &[("x-user-id", "u1")])).await,
     )
     .await;
     assert_eq!(s, StatusCode::OK);

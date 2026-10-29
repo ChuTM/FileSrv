@@ -69,7 +69,7 @@ async fn persistence_across_reopen() {
     let (s, v) = upload_bytes(&ctx1, &key, &secret, "u1", b"persisted-content", "").await;
     assert_eq!(s, StatusCode::OK);
     let file_id = v["file_id"].as_i64().unwrap();
-    let (s, v) = generate_link(&ctx1, &key, &secret, file_id, json!({})).await;
+    let (s, v) = generate_link(&ctx1, &key, &secret, file_id, "u1", json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let token = v["token"].as_str().unwrap().to_string();
     let _ = app_id;
