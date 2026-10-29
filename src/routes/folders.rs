@@ -243,7 +243,7 @@ pub async fn list_folder_files(AxState(st): AxState<AppState>, req: Request<Body
     }
 
     let mut stmt = conn.prepare(
-        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at
+        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at,name
          FROM files WHERE app_id=?1 AND folder_id=?2 AND deleted_at IS NULL ORDER BY id",
     )?;
     let rows = stmt.query_map(params![app_id, fid], |r| {
@@ -263,6 +263,7 @@ pub async fn list_folder_files(AxState(st): AxState<AppState>, req: Request<Body
             acl: r.get(12)?,
             created_at: r.get(13)?,
             deleted_at: r.get(14)?,
+            name: r.get(15)?,
         })
     })?;
     let mut out = Vec::new();

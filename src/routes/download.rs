@@ -83,7 +83,7 @@ pub async fn download_head(AxState(st): AxState<AppState>, req: Request<Body>) -
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", file.storage_uuid),
+            format!("attachment; filename=\"{}\"", disposition_filename(&file)),
         )
         .header(header::CONTENT_LENGTH, size)
         .body(Body::empty())
@@ -127,6 +127,19 @@ async fn resolve_download(
     let p = storage::resolve_blob(&st.cfg, grant.app_id, &file.storage_uuid, file.blob_path.as_deref())
         .map_err(|_| ApiError::not_found("File content missing."))?;
     Ok((file, p, grant.app_id))
+}
+
+/// Content-Disposition filename: prefer the stored original name (sanitized at
+/// upload), fall back to the storage uuid for legacy files. Re-sanitized here as
+/// defense in depth against header/control-character injection.
+fn disposition_filename(file: &db::FileRow) -> String {
+    match &file.name {
+        Some(n) if !n.is_empty() => n
+            .chars()
+            .filter(|c| !c.is_control() && *c != '"')
+            .collect::<String>(),
+        _ => file.storage_uuid.clone(),
+    }
 }
 
 fn parse_range(spec: &str, size: u64) -> Option<(u64, u64)> {
@@ -202,7 +215,7 @@ async fn serve_file(
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", file.storage_uuid),
+            format!("attachment; filename=\"{}\"", disposition_filename(file)),
         );
     if start != 0 || len != size {
         b = b

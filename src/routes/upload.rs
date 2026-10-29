@@ -32,6 +32,35 @@ impl Drop for TempBlobGuard {
 
 // ---------------- Upload ----------------
 
+/// Strip directory components and control characters from a client-supplied
+/// filename so it is safe to store and to echo in a Content-Disposition header.
+fn sanitize_file_name(raw: &str) -> String {
+    raw.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw)
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .collect::<String>()
+}
+
+/// Optional `X-File-Name` header (original filename, echoed on download) and
+/// `Content-Type` (stored as the file's MIME, matching the API contract that the
+/// server never infers a type from the filename). Falls back to the storage
+/// uuid / octet-stream when absent.
+fn orig_meta(headers: &axum::http::HeaderMap) -> (Option<String>, Option<String>) {
+    let name = headers
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(sanitize_file_name)
+        .filter(|s| !s.is_empty());
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 128);
+    (name, ct)
+}
+
 pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiResult {
     let uri = req.uri();
     let path = uri.path().to_string();
@@ -123,6 +152,9 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty() && s.len() <= 128);
+
+    // Original filename + content type (echoed on download, e.g. report.pdf).
+    let (orig_name, orig_ct) = orig_meta(&headers);
 
     // user_id: from JWT, or App vouches via X-User-Id header.
     let user_id = match &identity {
@@ -251,8 +283,8 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         .to_json();
         let blob_rel = storage::blob_rel_for_new(&st.cfg, &uuid);
         tx.execute(
-            "INSERT INTO files(app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'internal',?10,?11,?12)",
+            "INSERT INTO files(app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,name)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'internal',?10,?11,?12,?13)",
             params![
                 app_id,
                 user_id,
@@ -260,12 +292,13 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
                 uuid,
                 blob_rel,
                 uuid.clone(),
-                "application/octet-stream",
+                orig_ct.as_deref().unwrap_or("application/octet-stream"),
                 size as i64,
                 body_hash,
                 owner,
                 acl,
-                crate::config::Config::now()
+                crate::config::Config::now(),
+                orig_name.as_deref()
             ],
         )?;
         let fid = tx.last_insert_rowid();
@@ -326,7 +359,8 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         "size": size,
         "sha256": body_hash,
         "classification": "internal",
-        "content_type": "application/octet-stream"
+        "content_type": orig_ct.as_deref().unwrap_or("application/octet-stream"),
+        "name": orig_name,
     });
     if let Some(key) = &idem_key {
         st.idem.put(app_id, key, response.clone());
@@ -597,6 +631,8 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
     let upload_id = ctx
         .path_segment(3)
         .ok_or_else(|| ApiError::bad_request("Invalid upload id."))?;
+    // Original filename + content type (echoed on download, e.g. report.pdf).
+    let (orig_name, orig_ct) = orig_meta(&ctx.headers);
 
     let app = {
         let conn = st.db.lock().unwrap();
@@ -664,8 +700,8 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
         }
         .to_json();
         tx.execute(
-            "INSERT INTO files(app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'internal',?10,?11,?12)",
+            "INSERT INTO files(app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,name)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'internal',?10,?11,?12,?13)",
             params![
                 app_id,
                 user_id,
@@ -673,12 +709,13 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
                 uuid,
                 blob_rel,
                 uuid,
-                "application/octet-stream",
+                orig_ct.as_deref().unwrap_or("application/octet-stream"),
                 received,
                 digest,
                 user_id,
                 acl,
-                crate::config::Config::now()
+                crate::config::Config::now(),
+                orig_name.as_deref()
             ],
         )?;
         let fid = tx.last_insert_rowid();
@@ -737,7 +774,8 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
         "size": received,
         "sha256": digest,
         "classification": "internal",
-        "content_type": "application/octet-stream",
+        "content_type": orig_ct.as_deref().unwrap_or("application/octet-stream"),
+        "name": orig_name,
         "total_size": total_size
     })))
 }

@@ -157,7 +157,21 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
           UNIQUE(app_id, name)
         );
         "#,
-    )
+    )?;
+
+    // Column migration: files.name holds the original upload filename so
+    // downloads can echo it in Content-Disposition. Added after v1; DBs created
+    // before this change lack the column, so add it when missing.
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !cols.iter().any(|c| c == "name") {
+            conn.execute_batch("ALTER TABLE files ADD COLUMN name TEXT;")?;
+        }
+    }
+    Ok(())
 }
 
 pub struct AppRow {
@@ -332,11 +346,12 @@ pub struct FileRow {
     pub acl: String,
     pub created_at: i64,
     pub deleted_at: Option<i64>,
+    pub name: Option<String>,
 }
 
 pub fn file_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<FileRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at
+        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at,name
          FROM files WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(params![id], |r| {
@@ -356,6 +371,7 @@ pub fn file_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<FileRow
             acl: r.get(12)?,
             created_at: r.get(13)?,
             deleted_at: r.get(14)?,
+            name: r.get(15)?,
         })
     })?;
     rows.next().transpose()

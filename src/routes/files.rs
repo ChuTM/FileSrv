@@ -27,7 +27,7 @@ pub async fn list_files(AxState(st): AxState<AppState>, req: Request<Body>) -> A
 
     let conn = st.db.lock().unwrap();
     let mut sql = String::from(
-        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at
+        "SELECT id,app_id,user_id,folder_id,storage_uuid,blob_path,logical_path,content_type,size,sha256,classification,owner,acl,created_at,deleted_at,name
          FROM files WHERE app_id=?1 AND deleted_at IS NULL AND id>?2",
     );
     let mut args: Vec<rusqlite::types::Value> = vec![
@@ -67,6 +67,7 @@ pub async fn list_files(AxState(st): AxState<AppState>, req: Request<Body>) -> A
             acl: r.get(12)?,
             created_at: r.get(13)?,
             deleted_at: r.get(14)?,
+            name: r.get(15)?,
         };
         count += 1;
         if count > limit {

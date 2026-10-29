@@ -106,7 +106,8 @@ Call with a **user-context JWT** or **app identity**.
 |---|---|
 | `Authorization: Bearer <user-jwt>` or `X-App-Key`+`X-App-Signature` | identity |
 | `X-User-Id` | **required for app-level uploads** — the user the app vouches for |
-| `Content-Type` | MIME of the file (stored as-is; the server never infers from the filename) |
+| `Content-Type` | MIME of the file (stored as-is; the server never infers from the filename; defaults to `application/octet-stream`) |
+| `X-File-Name` | **optional** — original filename, echoed verbatim (basename only, sanitized) in the download `Content-Disposition` |
 
 Body: file content (streamed to a temp file, then verified).
 
@@ -125,13 +126,15 @@ Response `200`:
   "size": 1048576,
   "sha256": "9b1deb4d...",
   "classification": "internal",
-  "content_type": "application/octet-stream"
+  "content_type": "application/pdf",
+  "name": "report.pdf"
 }
 ```
 
-- The original filename is stripped; content is stored as an opaque UUID in the
-  app's dedicated directory. `logical_path` and the download filename are the
-  storage UUID.
+- Content is stored as an opaque UUID in the app's dedicated directory.
+  `logical_path` is the storage UUID; the **download filename** is the original
+  `X-File-Name` when provided (sanitized to its basename), otherwise the storage
+  UUID. The stored `Content-Type` is returned by `GET /v1/download/:token`.
 - Payload is capped while streaming: over `max_payload_bytes` → `413`;
   quota full → `429`.
 - Optional `?folder_id=` query targets a folder (must belong to the app).

@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use serde_json::{json, Value};
+use tower::ServiceExt;
 use filesrv::crypto::{self, sha256};
 use filesrv::db;
 use filesrv::storage;
@@ -260,4 +261,80 @@ async fn invalid_user_id_rejected_on_upload() {
     // a plain user_id still works
     let (s, _) = upload_bytes(&ctx, &key, &secret, "u_ok", b"x", "").await;
     assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn upload_original_name_and_content_type_echoed_on_download() {
+    let ctx = new_test_ctx();
+    let (_app_id, key, secret) = create_app_quota(&ctx.admin, "N", 1 << 20, 1 << 20).await;
+
+    // Upload with an original filename + content type; the response echoes them.
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(
+                &key, &secret, "POST", "/v1/upload", "",
+                b"%PDF-1.4 fake report",
+                &[
+                    ("x-user-id", "u1"),
+                    ("x-file-name", "report.pdf"),
+                    ("content-type", "application/pdf"),
+                ],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["name"], json!("report.pdf"));
+    assert_eq!(v["content_type"], json!("application/pdf"));
+    let file_id = v["file_id"].as_i64().unwrap();
+
+    // Filename is sanitized to its basename (no path traversal into the header).
+    let (s, v) = json_of(
+        send(
+            &ctx.public,
+            signed_req_raw(
+                &key, &secret, "POST", "/v1/upload", "",
+                b"x",
+                &[("x-user-id", "u1"), ("x-file-name", "../../evil.sh")],
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["name"], json!("evil.sh"));
+
+    // Download echoes the original name in Content-Disposition and the content type.
+    let (s, v) = generate_link(&ctx, &key, &secret, file_id, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let resp = ctx
+        .public
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/download/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert_eq!(cd, r#"attachment; filename="report.pdf""#);
+    assert_eq!(ct, "application/pdf");
 }

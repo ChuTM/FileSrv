@@ -99,7 +99,8 @@ JWT。任何在請求 body／header 中攜帶的 `user_id` 都會被忽略並覆
 |---|---|
 | `Authorization: Bearer <user-jwt>` 或 `X-App-Key`+`X-App-Signature` | 身份 |
 | `X-User-Id` | **app 層上傳必填** — app 為之背書的使用者 |
-| `Content-Type` | 檔案的 MIME（原樣儲存；伺服器絕不依檔名推測） |
+| `Content-Type` | 檔案的 MIME（原樣儲存；伺服器絕不依檔名推測；預設 `application/octet-stream`） |
+| `X-File-Name` | **選填** — 原始檔名，會原樣（僅基底名、經 sanitize）在下載 `Content-Disposition` 中回顯 |
 
 Body：檔案內容（串流至暫存檔後驗證）。
 
@@ -118,12 +119,14 @@ Response `200`：
   "size": 1048576,
   "sha256": "9b1deb4d...",
   "classification": "internal",
-  "content_type": "application/octet-stream"
+  "content_type": "application/pdf",
+  "name": "report.pdf"
 }
 ```
 
-- 原始檔名會被剝離；內容以不透明 UUID 儲存在該 app 的專屬目錄。`logical_path`
-  與下載檔名皆為 storage UUID。
+- 內容以不透明 UUID 儲存在該 app 的專屬目錄。`logical_path` 為 storage UUID；
+  **下載檔名**：有提供 `X-File-Name` 時用原始檔名（僅基底名、經 sanitize），
+  否則用 storage UUID。儲存的 `Content-Type` 會由 `GET /v1/download/:token` 回傳。
 - Payload 在串流時即設上限：超過 `max_payload_bytes` → `413`；配額滿 → `429`。
 - 選填 `?folder_id=` query 指向資料夾（須屬於該 app）。
 
