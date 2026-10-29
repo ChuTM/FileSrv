@@ -97,7 +97,7 @@ async fn zip_export_organized_by_user() {
     // entries organized per user
     use zip::read::ZipArchive;
     let mut za = ZipArchive::new(std::io::Cursor::new(body)).unwrap();
-    let names: Vec<String> = (0..za.len()).map(|i| za.by_index(i).unwrap().name().to_string()).collect();
+    let names: Vec<String> = (0..za.len()).map(|i| za.by_index(i).unwrap().name().unwrap().into_owned()).collect();
     assert!(names.iter().any(|n| n.starts_with("files/u1/")), "u1 missing: {names:?}");
     assert!(names.iter().any(|n| n.starts_with("files/u2/")), "u2 missing: {names:?}");
 }
