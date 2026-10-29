@@ -36,6 +36,10 @@ kept on disk**. The behaviour is simple:
 - **To keep more history**, raise `RETENTION` in `.env` (uses more disk).
   **To save space**, lower it. The value is read at startup, so change it and
   restart the service.
+- **External snapshots are outside this cap.** `scripts/backup.sh` writes to an
+  arbitrary destination you choose (e.g. an external drive). That directory is
+  NOT under `$BACKUP_ROOT`, so `RETENTION` does not apply to it — the server
+  never counts or prunes it; you manage those snapshots yourself.
 
 ### 1.3 Restoring
 
@@ -122,19 +126,76 @@ clean up:
 > `size_mismatch` / `sha_mismatch` usually mean corruption or a partial write;
 > restore the blob from a backup if one exists, otherwise treat as lost.
 
-### 3.4 Rotating the server secret
+### 3.4 Rotating secrets — two different things
 
-- Use `scripts/rotate-secret.sh`, or the **Rotate Secret** action per app for
-  an app's own key. The script backs up `.env` first, generates a new
+There are **two separate keys** that can be rotated. Do not confuse them.
+
+**Site-wide: the server secret (`TENANT_FS_SERVER_SECRET`)**
+
+- Use `scripts/rotate-secret.sh`. It backs up `.env`, generates a new
   `TENANT_FS_SERVER_SECRET`, and rewrites `.env`.
-- If blobs are sealed with the old key, run `blob_rekey` (see `deploy.md`) so
-  existing content stays readable after rotation.
-- After rotation every previously issued HMAC signature / user JWT becomes
-  invalid immediately. Update the backend(s) before you continue.
-- The admin token (`TENANT_FS_ADMIN_TOKEN`) can be rotated separately via
-  `filesrv admin rotate-token` — the CLI backs up, rotates, and prints the new
-  token; it also rewrites `.env`. Confirm the risk prompt, then update anything
-  that held the old token.
+- The server secret derives the KEK that seals **all** blobs and **every**
+  app's stored secret, so rotating it is a **site-wide** operation:
+  - every previously issued HMAC signature / user JWT becomes invalid
+    immediately — update the backends before you continue.
+
+**What happens during a server-secret rotation** (`rotate-secret.sh`):
+
+1. Reads the current secret from `.env` (or `--old`), then generates a new
+   random 32-byte secret with `openssl rand -base64 32`.
+2. Shows a risk disclosure and requires you to type **yes twice** (double
+   confirmation).
+3. Ensures the server is stopped (`--stop`, or stop it yourself).
+4. Takes a **safety snapshot**: `data/.pre-rotate-<ts>.fs.db` and
+   `.env.pre-rotate-<ts>`, so you can roll back.
+5. Runs the `rekey` tool. Thanks to envelope encryption this only
+   **re-seals each blob's per-file DEK** from the OLD secret to the NEW one —
+   the file payloads are never re-encrypted (no re-upload, cheap). Blobs that
+   can't be unwrapped with the OLD secret are skipped (reported as
+   "unwrappable") and stay unreadable.
+6. Updates `.env` **only after re-keying fully succeeds** (sed replaces the
+   `TENANT_FS_SERVER_SECRET` line, then `chmod 600`). A mid-run failure leaves
+   the OLD secret active, so it is retryable.
+7. To roll back, restore a `.pre-rotate-<ts>` snapshot, or re-run with
+   `--old <new> --new <old>` to reverse it.
+
+**Per-app: an app's own secret (`app_secret`)**
+
+- The **Rotate Secret** action (admin UI row menu, or
+  `filesrv admin app rotate-secret <id>`) regenerates **only that one app's**
+  access credential.
+- It is lightweight and isolated: it writes a new random secret sealed with
+  the (unchanged) server secret, and touches only that app. **No `blob_rekey`,
+  no JWT impact, no effect on other apps.**
+- Use it when a single app's key is leaked, or that app's client should be
+  re-keyed.
+
+**What happens during an app-secret rotation:**
+
+1. An authenticated admin targets the app by id.
+2. `crypto::random_secret()` generates a new random 32-byte secret (base64).
+3. It is **sealed** with the (unchanged) server secret's KEK and written into
+   the app's `secret_sealed` row, overwriting the old value.
+4. The old secret is gone from the DB, so **every HMAC signature made with the
+   old secret now fails** — that app's client must switch to the new secret
+   (the admin receives the plaintext to hand over). App requests are signed
+   with the secret via `app_key` + timestamp + nonce (HMAC), not JWT.
+5. Nothing else changes: server secret untouched, no blob re-key, other apps
+   and user JWTs unaffected. It is a single-row, single-secret swap.
+
+**Admin token (`TENANT_FS_ADMIN_TOKEN`) — what it is**
+
+- It is the **single management credential** for the admin console, stored in
+  `.env`. The admin API binds only to `127.0.0.1:8081` (loopback), so the token
+  is used on the machine / over SSH and never travels on the public network.
+- It authenticates the admin web UI login (the token lives in the page's
+  `sessionStorage`) and every `filesrv admin …` CLI command. It is checked
+  with a constant-time compare to resist timing attacks.
+- It grants **full admin power**: create / disable / archive / wipe apps, add
+  users, manage groups, run backups, read the audit log, rotate keys.
+- Rotate it separately with `filesrv admin rotate-token` — the CLI backs up,
+  rotates, prints the new token and rewrites `.env`. Confirm the risk prompt,
+  then update anything that held the old token.
 
 ### 3.5 Database corrupt or locked
 

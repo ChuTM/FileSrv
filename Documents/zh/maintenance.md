@@ -20,6 +20,7 @@
 - 當新備份創建時，如果已經存在 `RETENTION` 份，會自動刪除**最舊**的一份。因此你始終保留最近的 7 代，永遠不會無限堆積。
 - Settings 中 “Copies kept” = 當前實際存在的備份份數，“Retention” = 配置的上限。兩者獨立讀取：如果本周期還沒跑過備份，份數可以低於上限。
 - **想保留更多歷史**：調高 `.env` 里的 `RETENTION`（更占磁盤）。**想省空間**：調低。該值在啟動時讀取，改後需重啟服務。
+- **外部快照不受此上限約束。** `scripts/backup.sh` 寫到你指定的任意目標（例如外接硬碟）。該目錄不在 `$BACKUP_ROOT` 之下，所以 `RETENTION` 不適用於它——服務器不會數、不會清理，那份快照由你自己管理。
 
 ### 1.3 恢覆
 
@@ -86,12 +87,59 @@
 
 > `size_mismatch` / `sha_mismatch` 通常意味著損壞或寫入中斷；如果有備份，先從備份恢覆該 blob，否則視為丟失。
 
-### 3.4 輪換服務端密鑰
+### 3.4 輪換密鑰——這是兩件不同的事
 
-- 使用 `scripts/rotate-secret.sh`；針對某個 app 自身密鑰，可用 admin 里的 **Rotate Secret** 操作。腳本會先備份 `.env`、生成新的 `TENANT_FS_SERVER_SECRET` 並重寫 `.env`。
-- 如果 blob 是用舊密鑰加密的，輪換後請運行 `blob_rekey`（見 `deploy.md`），讓已有內容在輪換後仍可讀。
-- 輪換後，之前簽發的所有 HMAC 簽名 / 用戶 JWT 立即失效。繼續前先更新後端。
-- 管理 token（`TENANT_FS_ADMIN_TOKEN`）可單獨通過 `filesrv admin rotate-token` 輪換——CLI 會先備份、輪換、打印新 token，並重寫 `.env`。確認風險提示後，更新所有持有舊 token 的地方。
+系統有**兩套可以輪換的密鑰**，不要混淆。
+
+**站點級：服務端密鑰（`TENANT_FS_SERVER_SECRET`）**
+
+- 用 `scripts/rotate-secret.sh`。腳本會先備份 `.env`、生成新的
+  `TENANT_FS_SERVER_SECRET` 並重寫 `.env`。
+- 服務端密鑰派生出 KEK，密封**所有** blob 和**每個** app 存儲的密鑰，
+  所以輪換它是**全站級**操作：
+  - 之前簽發的所有 HMAC 簽名 / 用戶 JWT 立即失效——繼續前先更新後端。
+
+**輪換服務端密鑰時具體發生什麼**（`rotate-secret.sh`）：
+
+1. 從 `.env`（或 `--old`）讀當前密鑰，再用 `openssl rand -base64 32` 生成新的 32 字節隨機密鑰。
+2. 顯示風險說明，要求你**連續輸入兩次 yes**（雙重確認）。
+3. 確保服務器已停止（`--stop`，或先手動停）。
+4. 取**安全快照**：`data/.pre-rotate-<ts>.fs.db` 和 `.env.pre-rotate-<ts>`，以便回滾。
+5. 運行 `rekey` 工具。靠信封加密，它**只把每個 blob 的文件級 DEK 從舊密鑰重新密封到新密鑰**，文件體完全不重新加密（不用重傳、很快）。用舊密鑰解不開的 blob 會被跳過（標記 “unwrappable”）並保持不可讀。
+6. **只有 rekey 全部成功後才**更新 `.env`（sed 替換 `TENANT_FS_SERVER_SECRET` 那行，再 `chmod 600`）。中途失敗時舊密鑰仍生效，可重試。
+7. 回滾：用 `.pre-rotate-<ts>` 快照，或 `--old <new> --new <old>` 反向跑一次。
+
+**單個 app：該 app 自己的密鑰（`app_secret`）**
+
+- **Rotate Secret** 操作（admin UI 行菜單，或
+  `filesrv admin app rotate-secret <id>`）只重新生成**那一個 app** 的訪問憑證。
+- 它是輕量、隔離的：用（不變的）服務端密鑰密封並寫入一個新隨機密鑰，
+  只影響那一個 app。**不需要 `blob_rekey`、不影響 JWT、不影響其他 app。**
+- 用在某個 app 的密鑰疑似洩漏、或想給該 app 的客戶端換鑰時。
+
+**輪換某個 app 密鑰時具體發生什麼**：
+
+1. 已認證的 admin 按 id 指定該 app。
+2. `crypto::random_secret()` 生成新的 32 字節隨機密鑰（base64）。
+3. 用（不變的）服務端密鑰的 KEK **密封**後寫入該 app 的 `secret_sealed`
+   行，覆蓋舊值。
+4. 舊密鑰從 DB 消失，所以**用舊密鑰簽出的所有 HMAC 簽名立刻失效**——該 app
+   的客戶端必須改用新密鑰（admin 拿到明文去交接）。app 請求的簽名是
+   用密鑰按 `app_key` + 時間戳 + nonce（HMAC）做的，不是 JWT。
+5. 其他一切不變：服務端密鑰不動、無 blob 重密封、其他 app 與用戶 JWT
+   不受影響。就是一次單行、單密鑰的更換。
+
+**管理 token（`TENANT_FS_ADMIN_TOKEN`）——它是什麼**
+
+- 它是 admin 控制台的**唯一管理憑證**，存在 `.env` 中。admin API 只綁定
+  `127.0.0.1:8081`（loopback），所以該 token 只在機器上 / 通過 SSH 使用，
+  永不經公網傳輸。
+- 它認證：admin Web UI 登入（token 存在頁面的 `sessionStorage` 裡），以及
+  每條 `filesrv admin …` CLI 命令。用 constant-time 比較校驗以抵抗計時攻擊。
+- 它授予**完整管理權限**：創建 / 禁用 / 歸檔 / 銷毀 app、增刪用戶、管理分組、
+  跑備份、看審計日誌、輪換密鑰。
+- 用 `filesrv admin rotate-token` 單獨輪換——CLI 會先備份、輪換、打印新 token，
+  並重寫 `.env`。確認風險提示後，更新所有持有舊 token 的地方。
 
 ### 3.5 數據庫損壞或被鎖
 
