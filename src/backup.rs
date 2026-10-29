@@ -307,6 +307,7 @@ mod tests {
             idem_max_entries: 10000,
             export_ttl_secs: 86400,
             dec_cache_ttl_secs: 86400,
+            audit_downloads: false,
         };
         (cfg, ops)
     }

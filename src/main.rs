@@ -43,6 +43,25 @@ async fn main() {
             DEFAULT = filesrv::config::DEFAULT_ADMIN_TOKEN
         );
     }
+    // Hardening: refuse to run with the development default secrets unless an
+    // explicit dev escape hatch is set, so a deploy that omits the env vars
+    // cannot silently run the known default SERVER_SECRET / ADMIN_TOKEN.
+    // (The F6 non-loopback-admin refusal above follows the same pattern.)
+    let dev_allow_defaults = matches!(
+        std::env::var("TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS").as_deref(),
+        Ok("true") | Ok("1") | Ok("yes") | Ok("on")
+    );
+    if !dev_allow_defaults
+        && (cfg.server_secret == filesrv::DEFAULT_SERVER_SECRET
+            || cfg.admin_token == filesrv::config::DEFAULT_ADMIN_TOKEN)
+    {
+        panic!(
+            "refusing to start with development default secrets. \
+             Set TENANT_FS_SERVER_SECRET and TENANT_FS_ADMIN_TOKEN to real values \
+             (e.g. generate .env with ./scripts/setup-env.sh), or set \
+             TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS=true for local development only."
+        );
+    }
     let (public, admin, db_handle) = build_app(cfg.clone()).expect("failed to initialize server");
 
     let public_listener = tokio::net::TcpListener::bind(&cfg.public_bind)

@@ -107,6 +107,49 @@ async fn head_download_headers_and_404() {
 }
 
 #[tokio::test]
+async fn opt_in_download_audit_writes_a_row() {
+    // TENANT_FS_AUDIT_DOWNLOADS=true (ops.audit_downloads) records a per-download
+    // audit row; off by default so high-read workloads don't balloon the log.
+    let dir = TempDir::new().unwrap();
+    let cfg = cfg_at(&dir);
+    let mut ops = test_ops(&dir);
+    ops.audit_downloads = true;
+    let (public, admin) = custom_routers(&cfg, ops, 120);
+    let (app_id, key, secret) = create_app_quota(&admin, "aud", 1 << 20, 1 << 20).await;
+
+    let (s, v) = json_of(
+        send(&public, signed_req_raw(&key, &secret, "POST", "/v1/upload", "", b"audit-me", &[("x-user-id", "u1")])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fid = v["file_id"].as_i64().unwrap();
+    let (s, v) = json_of(
+        send(&public, signed_req(&key, &secret, "POST", "/v1/links/generate", "", json!({"file_id": fid}), &[])).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let (s, _) = send(
+        &public,
+        Request::builder().method("GET").uri(format!("/v1/download/{token}")).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (s, v) = json_of(
+        send(&admin, admin_req("GET", &format!("/admin/v1/audit?app_id={app_id}"), Value::Null)).await,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let entries = v["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| e["action"] == "download" && e["decision"] == "allow"),
+        "expected a download audit row, got {v}"
+    );
+}
+
+#[tokio::test]
 async fn rate_limit_429_carries_retry_after() {
     let dir = TempDir::new().unwrap();
     let cfg = cfg_at(&dir);

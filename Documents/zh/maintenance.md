@@ -8,9 +8,16 @@
 
 ### 1.1 備份如何工作
 
-- `scripts/backup.sh` 會在 `$BACKUP_ROOT`（默認 `data/backups/`）下按時間點生成一份拷貝，每次備份一個目錄，命名為 `bk_<id>`。
-- 一份備份包含：數據庫（`data/fs.db`）、blob 存儲（`data/blobs`），以及——**默認包含**——`.env` 文件。這樣完整恢覆時能把數據和密鑰（服務端密鑰、管理 token、綁定配置）一起還原。
-- Settings 頁的 Backup 卡片讀取這些信息並顯示：備份根目錄、當前保留的份數、保留上限、備份總字節數，以及最近一次備份的 id / 狀態 / 時間。
+有**兩套**備份機制，不要混淆：
+
+- **內建備份 API**（`POST /admin/v1/backups/run`）會在 `$BACKUP_ROOT`（默認
+  `data/backups/`）下按時間點生成一份拷貝，每次備份一個目錄，命名為 `bk_<id>`，
+  內含 `db.sqlite` + `blobs.tar` + `manifest.json`。Settings 頁的 Backup 卡片讀取
+  這些信息並顯示：備份根目錄、當前保留的份數、保留上限（`TENANT_FS_BACKUP_RETENTION`）、
+  備份總字節數，以及最近一次備份的 id / 狀態 / 時間。
+- **`scripts/backup.sh`** 是營運端的整目錄快照：把數據庫與 blob 存儲（以及——**默認
+  包含**——`.env` 文件）複製到你指定的目標目錄，這樣完整恢覆時能把數據和密鑰（服務端
+  密鑰、管理 token、綁定配置）一起還原。它與內建 API 是兩回事，不受保留上限管轄。
 
 ### 1.2 “Retention: 7 copies”是什麼意思
 

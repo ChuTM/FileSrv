@@ -16,7 +16,7 @@
 
 - Everything here mutates server/tenant state, so it requires the admin bearer
   token and only listens on `TENANT_FS_ADMIN_BIND` (default `127.0.0.1:8081`).
-- The web console and the local CLI (`scripts/admin-cli.sh`) are thin clients
+- The web console and the local CLI (`scripts/filesrv-cli.sh`) are thin clients
   over these endpoints.
 - Hardening headers are applied to console responses: `Content-Security-Policy`,
   `X-Frame-Options: DENY`, `Cache-Control: no-store`,
@@ -123,6 +123,10 @@ archive entry names can never contain traversal sequences.
 
 Filters: `app_id` (integer) and `since` (Unix seconds). Each entry carries
 `at, actor, action, app_id, target, ip, decision`.
+
+Downloads are **not** audited by default (keeps the log small on high-read
+workloads). Set `TENANT_FS_AUDIT_DOWNLOADS=true` to record a `download` entry
+(actor `token`, target = storage uuid) for every successful GET.
 
 ---
 

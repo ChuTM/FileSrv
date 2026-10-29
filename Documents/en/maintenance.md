@@ -11,15 +11,19 @@ it healthy. Code and commands are in English; the structure mirrors
 
 ### 1.1 How backups work
 
-- `scripts/backup.sh` creates a point-in-time copy under `$BACKUP_ROOT`
-  (default `data/backups/`), one directory per backup named `bk_<id>`.
-- A backup contains: the database (`data/fs.db`), the blob store
-  (`data/blobs`), and — **by default** — the `.env` file, so a full restore
-  brings back the data *and* the secrets (server secret, admin token, bind
-  settings) together.
-- The Settings page (Backup card) reads this from the API and shows the root,
-  how many copies are kept, the retention cap, the total backup bytes, and the
-  latest backup id / status / time.
+There are two backup mechanisms — don't confuse them:
+
+- **Built-in backup API** (`POST /admin/v1/backups/run`) writes a point-in-time
+  copy under `$BACKUP_ROOT` (default `data/backups/`), one directory per backup
+  named `bk_<id>`, containing `db.sqlite` + `blobs.tar` + `manifest.json`. The
+  Settings page (Backup card) reads this from the API and shows the root, how
+  many copies are kept, the retention cap, the total backup bytes, and the
+  latest backup id / status / time. Retention is `TENANT_FS_BACKUP_RETENTION`.
+- **`scripts/backup.sh`** is an operator-side whole-directory snapshot: it
+  copies the database + blob store (and, **by default**, the `.env` file) to a
+  destination you choose, so a full restore brings back the data *and* the
+  secrets (server secret, admin token, bind settings) together. It is separate
+  from the built-in API and is not governed by the retention cap.
 
 ### 1.2 What "Retention: 7 copies" means
 

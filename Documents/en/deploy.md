@@ -62,6 +62,7 @@ a safe default.
 |---|---|---|
 | `TENANT_FS_SERVER_SECRET` | auto-gen | Root key; derives the KEK sealing every app secret and blob. **Never** back it up with the data. |
 | `TENANT_FS_ADMIN_TOKEN` | auto-gen | Admin API bearer token; keep off the public network. |
+| `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS` | `false` | **Dev-only escape hatch.** The server refuses to start while `SERVER_SECRET`/`ADMIN_TOKEN` still hold their dev defaults unless set to `true`. Never set in production. |
 | `TENANT_FS_PUBLIC_BIND` | `0.0.0.0:8080` | Public file-API bind. |
 | `TENANT_FS_ADMIN_BIND` | `127.0.0.1:8081` | Admin bind. Loopback only; server refuses non-loopback unless `ALLOW_NON_LOOPBACK_ADMIN=true`. |
 | `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN` | `false` | Dangerous override to expose the admin surface. |
@@ -72,6 +73,7 @@ a safe default.
 | `TENANT_FS_RATE_LIMIT_PER_MIN` | `120` | Per-app budget per 60s window (upload/generate/export/download shared). `0` off. |
 | `TENANT_FS_RATE_LIMIT_MAX_ENTRIES` | `10000` | In-memory rate-limit map capacity. |
 | `TENANT_FS_MAX_BATCH_ACL` | `1000` | Max entries per batch-ACL call. |
+| `TENANT_FS_AUDIT_DOWNLOADS` | `false` | Record an audit row for every successful download; off by default. |
 | `TENANT_FS_EMBED_TTL` | `1800` | Embed-download token TTL (s). |
 | `TENANT_FS_SHARE_TTL` | `300` | Share-download token TTL (s). |
 | `TENANT_FS_IDEMPOTENCY_WINDOW_SECS` | `3600` | Idempotency-Key reuse window (s). |
@@ -206,6 +208,7 @@ going live, edit `src/admin_ui/static/.well-known/security.txt`:
 ## 9. Hardening checklist
 
 - [ ] `setup-env.sh` generated fresh `SERVER_SECRET`/`ADMIN_TOKEN`; `.env` is mode 600.
+- [ ] Dev defaults not in use: the server refuses to start with them (never set `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS=true` in production).
 - [ ] Admin port is never exposed publicly; `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN=false`.
 - [ ] TLS in front of the public port (Caddy/Nginx).
 - [ ] `TENANT_FS_TRUST_XFF=true` only behind a trusted reverse proxy.

@@ -55,6 +55,7 @@ nano .env                         # 檢視 / 編輯每個設定
 |---|---|---|
 | `TENANT_FS_SERVER_SECRET` | 自動產生 | 根金鑰；衍生出封存所有 app secret 與 blob 的 KEK。**切勿**隨資料備份。 |
 | `TENANT_FS_ADMIN_TOKEN` | 自動產生 | 管理 API 的 Bearer 權杖；請勿暴露於公共網路。 |
+| `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS` | `false` | **僅供開發的逃逸口。** 當 `SERVER_SECRET`／`ADMIN_TOKEN` 仍是 dev 預設值時，伺服器**拒絕啟動**，除非設為 `true`。生產環境切勿設定。 |
 | `TENANT_FS_PUBLIC_BIND` | `0.0.0.0:8080` | 公共檔案 API 綁定位址。 |
 | `TENANT_FS_ADMIN_BIND` | `127.0.0.1:8081` | 管理埠綁定位址。僅限 loopback；除非設 `ALLOW_NON_LOOPBACK_ADMIN=true`，否則綁定非 loopback 位址會直接 panic。 |
 | `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN` | `false` | 危險覆寫，會把管理面暴露到網路上。 |
@@ -65,6 +66,7 @@ nano .env                         # 檢視 / 編輯每個設定
 | `TENANT_FS_RATE_LIMIT_PER_MIN` | `120` | 每 app 每 60 秒視窗預算（upload/generate/export/download 共用）。`0` = 停用。 |
 | `TENANT_FS_RATE_LIMIT_MAX_ENTRIES` | `10000` | 記憶體限流表容量。 |
 | `TENANT_FS_MAX_BATCH_ACL` | `1000` | 單次批次 ACL 呼叫上限。 |
+| `TENANT_FS_AUDIT_DOWNLOADS` | `false` | 每次成功下載都寫入一條稽核紀錄；預設關閉。 |
 | `TENANT_FS_EMBED_TTL` | `1800` | embed 下載令牌 TTL（秒）。 |
 | `TENANT_FS_SHARE_TTL` | `300` | share 下載令牌 TTL（秒）。 |
 | `TENANT_FS_IDEMPOTENCY_WINDOW_SECS` | `3600` | Idempotency-Key 重複使用視窗（秒）。 |
@@ -190,6 +192,7 @@ data/
 ## 9. 加固檢查清單
 
 - [ ] `setup-env.sh` 已產生全新 `SERVER_SECRET`/`ADMIN_TOKEN`；`.env` 為 mode 600。
+- [ ] 未使用 dev 預設值：伺服器會以它們拒絕啟動（生產環境切勿設 `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS=true`）。
 - [ ] 管理埠永不公開暴露；`TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN=false`。
 - [ ] 公共埠前方有 TLS（Caddy/Nginx）。
 - [ ] `TENANT_FS_TRUST_XFF=true` 僅在受信任反向代理後方。

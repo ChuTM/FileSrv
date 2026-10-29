@@ -80,6 +80,11 @@ pub struct Ops {
     /// materialization of an encrypted blob, so it must not persist plaintext
     /// on disk indefinitely (F2 fix).
     pub dec_cache_ttl_secs: i64,
+    /// Opt-in: record an audit row for every successful download (GET
+    /// /v1/download/:token). Off by default to avoid audit volume on high-read
+    /// workloads; enable it when a per-download trail is required (e.g. for
+    /// sensitive files).
+    pub audit_downloads: bool,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -173,6 +178,10 @@ impl Ops {
                 .parse::<i64>()
                 .unwrap_or(86400)
                 .max(60),
+            audit_downloads: matches!(
+                env_or("TENANT_FS_AUDIT_DOWNLOADS", "false").as_str(),
+                "true" | "1" | "yes" | "on"
+            ),
         }
     }
 }

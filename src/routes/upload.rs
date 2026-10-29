@@ -289,7 +289,8 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         let enc_path = st.cfg.blob_root.join(format!("tmp_enc_{uuid}"));
         if let Err(e) = std::fs::write(&enc_path, &sealed) {
             let _ = std::fs::remove_file(&enc_path);
-            return Err(ApiError::internal_msg(format!("Blob encryption failed: {e}")));
+            eprintln!("[filesrv] blob encryption failed: {e}");
+            return Err(ApiError::internal());
         }
         let _ = std::fs::remove_file(&tmp_path);
         guard.0 = enc_path.clone(); // RAII now guards the staged envelope file
@@ -307,7 +308,8 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
             params![size as i64, app_id],
         )
         .ok();
-        return Err(ApiError::internal_msg(format!("Blob commit failed: {e}")));
+        eprintln!("[filesrv] blob commit failed: {e}");
+        return Err(ApiError::internal());
     }
     guard.1 = true; // blob committed; keep the staged file.
 
@@ -630,7 +632,10 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
     }
 
     let staged = std::path::PathBuf::from(&staged_path);
-    let bytes = std::fs::read(&staged).map_err(|_| ApiError::internal_msg("Staged upload unreadable."))?;
+    let bytes = std::fs::read(&staged).map_err(|e| {
+        eprintln!("[filesrv] staged upload unreadable: {e}");
+        ApiError::internal()
+    })?;
     let digest = sha256(&bytes);
     let uuid = crypto::new_uuid();
     let blob_rel = storage::blob_rel_for_new(&st.cfg, &uuid);
@@ -692,7 +697,8 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
         let enc_path = st.cfg.blob_root.join(format!("tmp_enc_{upload_id}"));
         if let Err(e) = std::fs::write(&enc_path, &sealed) {
             let _ = std::fs::remove_file(&enc_path);
-            return Err(ApiError::internal_msg(format!("Blob encryption failed: {e}")));
+            eprintln!("[filesrv] blob encryption failed: {e}");
+            return Err(ApiError::internal());
         }
         let _ = std::fs::remove_file(&staged);
         enc_path
@@ -709,7 +715,8 @@ pub async fn upload_finalize(AxState(st): AxState<AppState>, req: Request<Body>)
         )
         .ok();
         let _ = std::fs::remove_file(&staged_for_commit);
-        return Err(ApiError::internal_msg(format!("Blob commit failed: {e}")));
+        eprintln!("[filesrv] blob commit failed: {e}");
+        return Err(ApiError::internal());
     }
     // Session done: drop the job row (staged file is already renamed away).
     {

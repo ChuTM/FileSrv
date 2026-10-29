@@ -25,6 +25,25 @@ pub async fn download(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
     if let Err(resp) = ratelimit::gate(&st, app_id) {
         return Ok(*resp);
     }
+    // Opt-in per-download audit trail (TENANT_FS_AUDIT_DOWNLOADS=true). Off by
+    // default to avoid audit volume on high-read workloads; the maintenance
+    // loop still prunes old rows per TENANT_FS_AUDIT_RETENTION_DAYS.
+    if st.ops.audit_downloads {
+        if let Ok(conn) = st.db.lock() {
+            db::audit(
+                &conn,
+                &db::AuditEntry {
+                    actor: "token",
+                    action: "download",
+                    app_id: Some(app_id),
+                    target: &file.storage_uuid,
+                    ip: &ip,
+                    decision: "allow",
+                },
+                crate::config::Config::now(),
+            );
+        }
+    }
     serve_file(&file, &path, req.headers()).await
 }
 

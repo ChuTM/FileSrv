@@ -370,9 +370,14 @@ ss -ltnp | grep -E '8080|8081'                  # port held by a stale process?
 2. **`.env` missing / wrong permissions**: ensure it exists and is `600`
    (`ls -l .env`). Re-create only if you truly lost it — note that a newly
    generated `SERVER_SECRET` will **not** decrypt existing blobs (§6.5).
-3. **Binary not executable / missing**: `chmod +x target/release/filesrv`
+3. **Refusing to start with dev-default secrets**: the server panics while
+   `TENANT_FS_SERVER_SECRET` / `TENANT_FS_ADMIN_TOKEN` still hold their
+   development defaults. Generate a real `.env` with `./scripts/setup-env.sh`
+   (or set the values by hand); do **not** set
+   `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS=true` outside local development.
+4. **Binary not executable / missing**: `chmod +x target/release/filesrv`
    or rebuild `cargo build --release`.
-4. **Config error**: check the startup banner against expected binds; fix
+5. **Config error**: check the startup banner against expected binds; fix
    `.env`, then restart.
 
 ### 6.2 `/healthz` not `OK`
@@ -606,13 +611,15 @@ replayed as-is).
 |---|---|---|
 | `TENANT_FS_SERVER_SECRET` | blob encryption root key | must be stable across backup→restore (§6.5) |
 | `TENANT_FS_ADMIN_TOKEN` | bearer token for admin API/UI | rotate cheaply (§4.5) |
+| `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS` | dev-only escape hatch | server refuses to start with dev-default secrets unless `true` |
+| `TENANT_FS_AUDIT_DOWNLOADS` | per-download audit | `false` (off) by default |
 | `TENANT_FS_PUBLIC_BIND` | public listener address | default `0.0.0.0:8080` |
 | `TENANT_FS_ADMIN_BIND` | admin listener address | default `127.0.0.1:8081` |
 | `TENANT_FS_DB` | SQLite path | default `data/fs.db` |
 | `TENANT_FS_BLOBS` | blob root | default `data/blobs` |
 | `TENANT_FS_BACKUP_ROOT` | built-in backups dir | default `data/backups` |
-| `TENANT_FS_RETENTION` | built-in backup retention (days) | default 7 |
-| `TENANT_FS_SCHEDULE_SECS` | built-in backup schedule interval | `0` = off |
+| `TENANT_FS_BACKUP_RETENTION` | built-in backup retention (copies) | default 7 |
+| `TENANT_FS_BACKUP_SCHEDULE_SECS` | built-in backup schedule interval | `0` = off |
 | `TENANT_FS_MAX_*` | batch ACL / payload / quota limits | per-cap |
 
 ### 7.3 Command quick reference

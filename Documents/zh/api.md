@@ -69,11 +69,11 @@ JWT。任何在請求 body／header 中攜帶的 `user_id` 都會被忽略並覆
 ```json
 {
   "owner": "u_8f3a",
-  "read":   ["u_2c9d", "group:team_ops"],
+  "read":   ["u_2c9d", "g:team_ops"],
   "write":  ["u_2c9d"],
   "delete": [],
-  "list":   ["u_2c9d", "group:team_ops"],
-  "export": ["group:admins"],
+  "list":   ["u_2c9d", "g:team_ops"],
+  "export": ["g:admins"],
   "deny":   ["u_mallory"],
   "public_read": false
 }
@@ -261,7 +261,7 @@ Soft-delete：設墓碑（`deleted_at`），立即釋放該 app 的儲存用量�
 `PATCH /v1/files/:id/acl` — 修改單一檔案的 ACL（owner 或 app 層）。Body：
 
 ```json
-{ "action": "read", "add": ["u_2c9d", "group:ops"], "remove": ["u_mallory"], "deny": ["u_mallory"] }
+{ "action": "read", "add": ["u_2c9d", "g:ops"], "remove": ["u_mallory"], "deny": ["u_mallory"] }
 ```
 
 ### 8.4 資料夾 ACL（可遞迴）
@@ -269,7 +269,7 @@ Soft-delete：設墓碑（`deleted_at`），立即釋放該 app 的儲存用量�
 `PATCH /v1/folders/:id/acl`
 
 ```json
-{ "action": "read", "add": ["group:team_ops"], "recursive": true }
+{ "action": "read", "add": ["g:team_ops"], "recursive": true }
 ```
 
 `recursive: true` 套用至子資料夾；`deny` 維持鏈上優先。
@@ -350,8 +350,8 @@ Response `202`：
   原子性執行；超配額 → `429 quota_exceeded`。
 - Payload 超上限 → `413 payload_too_large`。
 - **Per-app rate limiting**：`generate`、`upload`（普通與分塊的
-  init/chunk/finalize）與 `export` 共用每個 `app_id` 的固定 60 秒窗口。窗口
-  用盡時呼叫以 `429` 失敗，回應 header 帶 `Retry-After: <視窗重置剩餘秒數>`，
+  init/chunk/finalize）、`export` 與 `download` 共用每個 `app_id` 的固定 60 秒窗口。
+  窗口用盡時呼叫以 `429` 失敗，回應 header 帶 `Retry-After: <視窗重置剩餘秒數>`，
   body 為 `{ "error": { "code": "rate_limited", ... } }`。
   旋鈕：`TENANT_FS_RATE_LIMIT_PER_MIN`（預設 120；0 = 停用）、
   `TENANT_FS_RATE_LIMIT_MAX_ENTRIES`（預設 10000；硬 map 容量，過期窗口

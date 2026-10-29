@@ -201,9 +201,11 @@ story) without losing anything — both are re-created on demand.
 - **Data safety**: SQLite WAL + foreign keys; single-writer mutex serializes
   writes (correct, but the write bottleneck — expect ~1k+ small writes/s).
 - **Secret hygiene**: `TENANT_FS_SERVER_SECRET` and `TENANT_FS_ADMIN_TOKEN`
-  both have dev defaults; the server now prints a loud startup WARNING for
-  **both**. Set both explicitly in production, and store `SERVER_SECRET`
-  independently from your backup media.
+  both have dev defaults; the server prints a loud startup WARNING for **both**
+  and now **refuses to start** while either is the dev default, unless
+  `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS=true` is set (dev-only escape hatch —
+  never in production). Set both explicitly in production, and store
+  `SERVER_SECRET` independently from your backup media.
 - **Expiry housekeeping**: the background maintenance loop
   (`TENANT_FS_PURGE_INTERVAL_SECS`, default 600s) prunes nonces, old audit
   rows (`TENANT_FS_AUDIT_RETENTION_DAYS`, default 30), expired `tokens` rows,
@@ -227,6 +229,11 @@ story) without losing anything — both are re-created on demand.
   against the same per-app budget as upload/generate/export
   (`TENANT_FS_RATE_LIMIT_PER_MIN`, default 120/min) — a hot link cannot exhaust
   server I/O with unbounded token traffic (F7 fix).
+- **Download audit (opt-in)**: by default a successful download is not audited
+  (keeps the log small on high-read workloads). Set
+  `TENANT_FS_AUDIT_DOWNLOADS=true` to record a `download` audit row per GET —
+  useful when a per-download trail is required for sensitive files. Old rows are
+  still pruned per `TENANT_FS_AUDIT_RETENTION_DAYS`.
 - **User directory**: users are provisioned by the operator via
   `POST /admin/v1/apps/{id}/users` (admin console: "用戶" button on each app);
   an app can also still vouch for a user at upload time via `X-User-Id`.
@@ -245,3 +252,8 @@ story) without losing anything — both are re-created on demand.
   endpoint).
 - Backup target is local-disk relative; S3 / restic-style remote destinations
   are not yet implemented.
+- **Large-file memory**: an encrypted blob is decrypted by reading the whole
+  file into memory (same for a chunked-upload finalize). Under heavy concurrency
+  with large files this raises RAM usage. Mitigations today: keep
+  `max_payload_bytes`/quota caps sensible and size host RAM accordingly;
+  streaming decryption is future work.

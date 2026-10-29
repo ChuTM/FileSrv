@@ -75,11 +75,11 @@ unique within the app.
 ```json
 {
   "owner": "u_8f3a",
-  "read":   ["u_2c9d", "group:team_ops"],
+  "read":   ["u_2c9d", "g:team_ops"],
   "write":  ["u_2c9d"],
   "delete": [],
-  "list":   ["u_2c9d", "group:team_ops"],
-  "export": ["group:admins"],
+  "list":   ["u_2c9d", "g:team_ops"],
+  "export": ["g:admins"],
   "deny":   ["u_mallory"],
   "public_read": false
 }
@@ -281,7 +281,7 @@ Success → `204`.
 `PATCH /v1/files/:id/acl` — change one file's ACL (owner or app level). Body:
 
 ```json
-{ "action": "read", "add": ["u_2c9d", "group:ops"], "remove": ["u_mallory"], "deny": ["u_mallory"] }
+{ "action": "read", "add": ["u_2c9d", "g:ops"], "remove": ["u_mallory"], "deny": ["u_mallory"] }
 ```
 
 ### 8.4 Folder ACL (recursive)
@@ -289,7 +289,7 @@ Success → `204`.
 `PATCH /v1/folders/:id/acl`
 
 ```json
-{ "action": "read", "add": ["group:team_ops"], "recursive": true }
+{ "action": "read", "add": ["g:team_ops"], "recursive": true }
 ```
 
 `recursive: true` applies to child folders; `deny` stays chain-priority.
@@ -374,9 +374,9 @@ maintenance loop.
   (per file) — enforced atomically; over quota → `429 quota_exceeded`.
 - Payload over limit → `413 payload_too_large`.
 - **Per-app rate limiting**: `generate`, `upload` (plain and chunked
-  init/chunk/finalize) and `export` share one fixed 60s window per `app_id`.
-  When the window is exhausted the call fails with `429`, response header
-  `Retry-After: <seconds until the window resets>` and body
+  init/chunk/finalize), `export` and `download` share one fixed 60s window per
+  `app_id`. When the window is exhausted the call fails with `429`, response
+  header `Retry-After: <seconds until the window resets>` and body
   `{ "error": { "code": "rate_limited", ... } }`.
   Knobs: `TENANT_FS_RATE_LIMIT_PER_MIN` (default 120; 0 = disabled),
   `TENANT_FS_RATE_LIMIT_MAX_ENTRIES` (default 10000; hard map capacity, stale

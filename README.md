@@ -53,6 +53,51 @@ documents, images, …).
 - **Admin console**: a small loopback-only HTML/JS dashboard on the admin bind,
   pure client-side bearer auth, hardened CSP / frame-deny / no-store headers.
 
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph Clients["Clients"]
+        AB["App backend<br/>(HMAC-signed or user JWT)"]
+        EU["End user<br/>(download link)"]
+        OP["Operator<br/>(SSH + CLI / console)"]
+    end
+
+    subgraph L["Two listeners"]
+        PUB["Public · :8080<br/>/v1/* · /healthz"]
+        DL["Public · :8080<br/>/v1/download/:token"]
+        ADM["Admin · :8081 (loopback only)<br/>/admin/v1/* + console"]
+    end
+
+    subgraph G["Identity → authorization → limits"]
+        ID["Identity<br/>app HMAC · user JWT · capability token"]
+        ACL["ACL<br/>deny-wins · inheritance · g:group"]
+        RL["Per-app rate limit<br/>60s fixed window"]
+    end
+
+    subgraph D["Storage"]
+        DB[("SQLite (WAL)<br/>metadata · ACL · audit")]
+        BLOB[("Envelope-encrypted blobs<br/>app_{id}/yyyy/mm/{uuid}")]
+    end
+
+    AB --> PUB
+    EU --> DL
+    OP --> ADM
+    PUB --> ID
+    DL --> ID
+    ID --> ACL
+    ACL --> RL
+    RL --> DB
+    DB --> BLOB
+    ADM --> DB
+```
+
+App and user requests land on the public listener, are resolved to an identity,
+checked against the ACL engine (deny always wins, folders inherit), then rate
+limited per app before touching storage. Downloads are separate: a capability
+token is verified by itself (no app key). The operator surface is a second,
+loopback-only listener protected by a bearer token.
+
 ## Quick start
 
 Prerequisites: Rust toolchain (to build), `sqlite3` and `openssl` (for
@@ -131,8 +176,8 @@ and stops once the alias is configured.
 ## Verify
 
 ```bash
-cargo test          # 60 tests: 32 unit + 28 integration
-cargo clippy --all-targets   # 0 warnings
+cargo test          # 73 tests: 37 unit + 36 integration
+cargo clippy --lib  # 0 warnings (test targets emit dead-code warnings only)
 ```
 
 Integration tests cover cross-tenant isolation, quota enforcement, ACL
@@ -168,6 +213,13 @@ Additional hardening knobs:
 
 - `TENANT_FS_ALLOW_NON_LOOPBACK_ADMIN` (default `false`) — the server refuses to
   start when the admin bind is not loopback unless this is explicitly set.
+- `TENANT_FS_DEV_ALLOW_DEFAULT_SECRETS` (default `false`) — the server **refuses
+  to start** while `TENANT_FS_SERVER_SECRET` / `TENANT_FS_ADMIN_TOKEN` still hold
+  their development defaults, unless this dev-only escape hatch is set. Never set
+  it in production.
+- `TENANT_FS_AUDIT_DOWNLOADS` (default `false`) — opt-in: record an audit row for
+  every successful download (`GET /v1/download/:token`), for a per-download trail
+  on sensitive files.
 - Downloads count against the same per-app rate-limit budget
   (`TENANT_FS_RATE_LIMIT_PER_MIN`) as upload/generate/export.
 - Users are provisioned by the operator via `POST /admin/v1/apps/{id}/users`
@@ -183,9 +235,14 @@ scripts/
   backup.sh        optional whole-`data/` snapshot to a path you specify
   filesrv-cli.sh    shell front-end (SSH): filesrv-cli admin … / health / version
 .env.example       template of all TENANT_FS_* settings (commented, safe defaults)
+SECURITY.md        supported versions + how to report a vulnerability
+LICENSE            proprietary — all rights reserved (closed source)
 Documents/
-  en/              English docs: api.md (app-facing), deploy.md
-  zh/              繁體中文 docs: api.md (app-facing), deploy.md
+  en/              English docs: api.md (app-facing), deploy.md, maintenance.md
+  zh/              繁體中文 docs: README.md, api.md, deploy.md, maintenance.md,
+                   Ops-and-Backup.md, maintenance-runbook.md, admin-api.md
+  Ops-and-Backup.md  data & key policy (English; zh mirror under zh/)
+  maintenance.md     Maintenance & Operations runbook (English; zh mirror under zh/)
 development/
   admin-api.md     loopback admin API: apps / users / audit / backups / console
   (规划/测试报告)     internal planning & test reports
