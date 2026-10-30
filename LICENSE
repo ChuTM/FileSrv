@@ -1,25 +1,415 @@
-Tenant FS Server (filesrv) — Proprietary License
+                            The AlphaBrate Pure Experience Licence
+                                        Version 2.0
 
-Copyright (c) 2026 Ming Chu
+                   Copyright (C) 2025-2026 AlphaBrate. All rights reserved.
 
-All rights reserved.
+   Software copyright notice: Copyright (C) 2026 Ming Chu ([ChuTM](https://github.com/chutm)).
 
-This software and its source code are the exclusive property of the copyright
-holder. Permission is granted to use, copy, and modify the software for
-internal purposes only, and only while such use is expressly authorized in
-writing by the copyright holder.
+   Repository: [FileSrv](https://github.com/chutm/filesrv)
 
-You may NOT:
+   PREAMBLE
 
-- redistribute, publish, sublicense, or otherwise make this software, in whole
-  or in part, available to any third party;
-- offer this software, or any derivative of it, as a hosted service to others;
-- remove, alter, or obscure any copyright, license, or proprietary notices.
+   The Author owns the copyright in the Software and makes the Software
+   available to the public free of charge on the terms and conditions set
+   out in this Licence.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
-FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+   By obtaining a copy of the Software, the Licensee accepts and agrees
+   to be bound by the terms and conditions of this Licence.
+
+   TERMS AND CONDITIONS
+
+   1. Interpretation.
+
+      In this Licence, unless the context otherwise requires:
+
+      (a) words importing the singular number include the plural and vice
+          versa, and words importing a gender include every other gender;
+
+      (b) references to "this Licence", "the Licence", and "these terms"
+          mean the AlphaBrate Pure Experience Licence, Version 2.0, in its
+          entirety;
+
+      (c) clause and Schedule headings are included for convenience only
+          and shall not affect the interpretation of this Licence;
+
+      (d) references to "writing" and "written" include electronic mail
+          and any other means of communication which produces a permanent
+          and readable record;
+
+      (e) a reference to a statute, ordinance, or regulation includes any
+          subsequent amendment, re-enactment, extension, or consolidation
+          of that statute, ordinance, or regulation;
+
+      (f) a reference to any person includes a natural person, a body
+          corporate, a partnership, an unincorporated association, a
+          government, an authority, and any other legal entity;
+
+      (g) the expressions "include", "includes", and "including" mean
+          including without limitation, and any list of examples shall not
+          be construed as limiting the generality of the provision in which
+          it appears;
+
+      (h) references to clauses and Schedules are references to clauses
+          and Schedules of this Licence, and a reference to a clause
+          includes all of its sub-clauses.
+
+   2. Definitions.
+
+      In this Licence, the following expressions shall, unless the context
+      otherwise requires, have the meanings assigned to them below:
+
+      (a) "Advertisements" means any commercial announcements, promotional
+          banners, pop-up windows, tracking elements, or other content
+          which is introduced into the Software, which is not part of the
+          core functionality of the Software, and which is intended to
+          promote any goods, services, or brands, or to collect data about
+          users for commercial purposes;
+
+      (b) "Author" means the licensor who owns the copyright in the
+          Software and who makes the Software available under this Licence,
+          being the original developer and owner of the Software, whose
+          name and year of copyright are set out in the copyright notice
+          accompanying the Software;
+
+      (c) "Computer Program" has the meaning given to that expression in
+          the Copyright Ordinance (Chapter 528 of the Laws of the Hong Kong
+          Special Administrative Region), and includes both the source code
+          and the object code of the relevant program;
+
+      (d) "Distribution" means any act of making the Software available to
+          other persons, whether in source form, in compiled or object
+          form, by means of a Hosted Service, by physical media, by
+          electronic transmission, or by any other means whatsoever;
+
+      (e) "Excluded Content" means any material other than computer program
+          source code which does not form part of the Software, including
+          but not limited to text-based publications such as electronic
+          books and prose or manuscript files, media files, images, audio
+          and video recordings, graphics, and any other creative, editorial,
+          or knowledge-based materials;
+
+      (f) "Hosted Service" means the operation of the Software, or of a
+          Modification of the Software, on one or more computer servers
+          under the control of the Licensee, together with the provision of
+          access to the functionality of the Software to other persons over
+          a computer network, whether for a fee or free of charge;
+
+      (g) "Licensee" means any person who obtains a copy of the Software,
+          whether from the Author or from another Licensee;
+
+      (h) "Modification" means any alteration, adaptation, translation,
+          addition, deletion, or rearrangement of any part of the Software,
+          whether in source form or in compiled form, and includes any work
+          which is derived from the Software;
+
+      (i) "Software" means the computer program source code files which are
+          distributed together with this Licence as part of the software
+          package to which this Licence applies, together with any
+          associated configuration files, build scripts, and code-level
+          documentation files distributed with those source code files, but
+          does not include any Excluded Content;
+
+      (j) "Substantial Original Contribution" means a new functionality,
+          feature, content, or other material addition made by the Licensee
+          to the Software which is of genuine and independent value to
+          users, and which is not merely a compilation, packaging,
+          formatting, or trivial alteration of the Software as received from
+          the Author;
+
+      (k) "Value-Free Resale" means the charging of any fee, price,
+          subscription, or other consideration from the public in exchange
+          for the Software or a Modification, in circumstances where the
+          Licensee has not made a Substantial Original Contribution to the
+          Software or Modification so charged.
+
+   3. Grant of Licence.
+
+      Subject always to the terms and conditions of this Licence, the
+      Author hereby grants to each Licensee a non-exclusive, worldwide,
+      royalty-free, perpetual licence, revocable only as provided in
+      Section 9, to do the following acts in relation to the Software:
+
+      (a) use the Software;
+
+      (b) copy the Software, in whole or in part;
+
+      (c) modify the Software, including by creating Modifications of the
+          Software;
+
+      (d) merge the Software with other works, whether software or
+          otherwise;
+
+      (e) publish and distribute the Software and any Modifications,
+          whether in source form or in compiled form;
+
+      (f) sublicense the Software, subject always to the terms and
+          conditions of this Licence; and
+
+      (g) permit other persons to do any of the acts described in this
+          Section 3.1, subject always to the same terms and conditions of
+          this Licence.
+
+      The rights granted under Section 3.1 are granted free of charge, and
+      no royalty, fee, or other payment shall be required from the Licensee
+      to the Author in respect of the exercise of those rights.
+
+      Any sublicence granted under Section 3.1(f) shall be subject to all
+      of the terms and conditions of this Licence, and a sublicensee shall
+      enjoy no greater rights in respect of the Software than the Licensee.
+
+      The grant of rights under this Section 3 extends only to the Software
+      as defined in Section 2.1(i), and shall not extend to any Excluded
+      Content.
+
+   4. Conditions - Attribution and Notice.
+
+      The above copyright notice and this permission notice shall be
+      included in all copies, or in all substantial portions, of the
+      Software and of any Modification distributed by the Licensee.
+
+      Any Distribution of the Software or of a Modification, whether in
+      source form, in compiled form, or as part of a Hosted Service, shall
+      clearly identify the Author as the original author of the Software.
+
+      Any Distribution of a Modification shall accurately describe the
+      Modifications made by the Licensee relative to the Software as
+      received from the Author.
+
+      The Licensee shall not remove, obscure, or alter any copyright
+      notice, attribution, or identification of the Author contained in the
+      Software, and shall not take any step which would have the effect of
+      misrepresenting the Software as the original work of the Licensee or
+      of any person other than the Author.
+
+   5. Permitted Uses - Self-Hosting and Hosted Services.
+
+      The Licensee is permitted to deploy the Software, or any Modification
+      of the Software, to one or more computer servers, and to provide the
+      functionality of the Software to other persons as a Hosted Service.
+
+      Where the Licensee provides a Hosted Service under Section 5.1, the
+      Licensee shall:
+
+      (a) state clearly, in a manner reasonably visible to users of the
+          Hosted Service, that the Software is the original work of the
+          Author; and
+
+      (b) accurately describe any Modifications made by the Licensee to the
+          Software, including the precise nature of each Modification.
+
+      The permission conferred by this Section 5 shall not authorise the
+      Licensee to engage in Value-Free Resale, and the provisions of
+      Section 6 shall continue to apply to any Hosted Service provided by
+      the Licensee.
+
+   6. Prohibited Uses.
+
+      The Licensee shall not engage in Value-Free Resale. Without limiting
+      the generality of the foregoing, the Licensee shall not:
+
+      (a) fork the Software and sell it directly to the public for any fee,
+          price, subscription, or other consideration; or
+
+      (b) compile or package the Software into a distributable form without
+          first making a Substantial Original Contribution to the Software,
+          and then charge the public for the resulting product,
+          distribution, or access.
+
+      The Licensee shall not embed, incorporate, cause to be displayed, or
+      otherwise introduce into the Software any Advertisements or other
+      promotional content which interfere with the core functionality of
+      the Software or which are distracting to the user's experience of the
+      Software.
+
+      Nothing in this Licence shall be construed as prohibiting the use of
+      the Software for non-commercial purposes, including personal use,
+      academic or educational use, research, or use as an internal tool of
+      the Licensee's own organisation, provided always that such use does
+      not constitute, or facilitate, Value-Free Resale.
+
+   7. Scope of the Software and Excluded Content.
+
+      This Licence applies only to the computer program source code files
+      which form the Software, that is, the files distributed together with
+      this Licence.
+
+      Excluded Content does not form part of the Software and is not
+      licensed under this Licence. Excluded Content shall remain subject to
+      the exclusive rights of the Author and shall not be used, copied,
+      modified, published, distributed, or sublicensed under this Licence,
+      unless separately and expressly authorised by the Author.
+
+      Where the classification of any file as part of the Software or as
+      Excluded Content is ambiguous, the determination of the Author shall
+      prevail.
+
+   8. Derivative Works and Further Distribution.
+
+      A Licensee may create Modifications and may Distribute the same,
+      subject always to the terms and conditions of this Licence.
+
+      Any Distribution of a Modification shall comply with the provisions
+      of Section 4 (Conditions - Attribution and Notice).
+
+      A Licensee who Distributes a Modification shall be responsible for
+      that Modification and for all claims arising in connection with it,
+      and shall not attribute to the Author any liability for defects,
+      errors, or deficiencies in the Modification.
+
+      In exercising any of the rights granted under this Licence, the
+      Licensee shall comply with all applicable laws and regulations,
+      including any applicable data protection laws.
+
+   9. Revocation.
+
+      The Author reserves the right to revoke this Licence at any time,
+      with or without notice.
+
+      Revocation under Section 9.1 shall apply only prospectively, that is,
+      only to versions of the Software released by the Author after the
+      date of revocation.
+
+      Copies of the Software which were lawfully distributed before the
+      date of revocation shall remain licensed under this Licence in
+      perpetuity, notwithstanding any subsequent revocation by the Author.
+
+      Any Modification lawfully created by a Licensee before the date of
+      revocation shall continue to be governed by the terms and conditions
+      of this Licence in force at the time of its creation, and may continue
+      to be used, copied, modified, published, and distributed in accordance
+      with those terms and conditions.
+
+      Versions of the Software released by the Author after the date of
+      revocation shall not be covered by this Licence, and shall not be
+      used, copied, modified, published, distributed, or sublicensed under
+      this Licence.
+
+      For the avoidance of doubt, nothing in this Section 9 shall authorise
+      the revocation of rights which have already vested in a Licensee in
+      respect of copies of the Software lawfully distributed before the
+      date of revocation.
+
+      If a Licensee commits a material breach of this Licence, the Author
+      may terminate the Licence granted to that Licensee with immediate
+      effect upon written notice, without prejudice to any other rights or
+      remedies available to the Author.
+
+   10. No Warranty.
+
+      The Software is provided on an "as is" basis, without warranty of any
+      kind, whether express, implied, statutory, or otherwise, including
+      but not limited to any implied warranties of merchantability, fitness
+      for a particular purpose, and non-infringement.
+
+      The Author does not warrant that the Software will operate without
+      error, that it will meet the requirements of the Licensee, or that it
+      is free from defects, viruses, or other harmful components.
+
+      The entire risk arising out of the use or performance of the Software
+      remains with the Licensee.
+
+   11. Limitation of Liability.
+
+      Nothing in this Licence shall exclude or limit any liability which
+      the Author may have which is not capable of being excluded or limited
+      by law. Subject always to Section 11.2, and to the fullest extent
+      permitted by law, the Author shall not be liable to any person for
+      any loss, damage, cost, expense, or other liability whatsoever,
+      whether in contract, tort (including negligence), or otherwise,
+      arising out of or in connection with the Software, the use of or
+      other dealings in the Software, or this Licence.
+
+      For the avoidance of doubt, the Author shall not, in any
+      circumstances, be liable to any person for any indirect, special,
+      incidental, consequential, or punitive damages, including without
+      limitation loss of profits, loss of data, or loss of goodwill,
+      whether or not the Author has been advised of the possibility of such
+      damages and regardless of the form of action in which such damages
+      are claimed.
+
+   12. Intellectual Property Rights.
+
+      The Software, and all intellectual property rights subsisting in the
+      Software, are and shall remain the property of the Author. This
+      Licence does not transfer ownership of any intellectual property
+      rights in the Software, but grants to the Licensee only the licence
+      rights set out in Section 3.
+
+      Nothing in this Licence shall be construed as granting to the
+      Licensee any right to use the name of the Author, or any of the trade
+      marks, service marks, or logos of the Author, whether in connection
+      with the Software or otherwise. All trade marks, service marks, and
+      logos of the Author are reserved and shall remain the exclusive
+      property of the Author.
+
+      Nothing in this Licence shall be construed as granting to the
+      Licensee any licence under any patent rights of the Author, save only
+      to the extent necessary to exercise the rights granted under Section
+      3 in respect of the Software as provided to the Licensee.
+
+   13. Governing Law and Jurisdiction.
+
+      This Licence, and any dispute, controversy, or claim arising out of
+      or in connection with it, whether contractual or non-contractual,
+      shall be governed by and construed in accordance with the laws of the
+      Hong Kong Special Administrative Region of the People's Republic of
+      China.
+
+      The courts of the Hong Kong Special Administrative Region shall have
+      exclusive jurisdiction to settle any dispute, controversy, or claim
+      referred to in Section 13.1, and the parties irrevocably submit to
+      the jurisdiction of those courts.
+
+   14. General Provisions.
+
+      Severability. If any provision of this Licence is held to be invalid,
+      illegal, or unenforceable by a court of competent jurisdiction, that
+      provision shall be severed from this Licence to the extent of such
+      invalidity, illegality, or unenforceability, and the remaining
+      provisions shall continue in full force and effect.
+
+      Entire Agreement. This Licence constitutes the entire agreement
+      between the Author and the Licensee in relation to the subject matter
+      of this Licence, and supersedes any prior agreement, understanding,
+      or representation relating to that subject matter.
+
+      Waiver. No failure or delay by the Author in exercising any right
+      under this Licence shall operate as a waiver of that right, and no
+      single or partial exercise of any right shall preclude any further
+      exercise of that right.
+
+      No Assignment. This Licence is personal to the Licensee and, save as
+      provided in Section 3.1(f), may not be assigned, sublicensed, or
+      otherwise transferred by the Licensee without the prior written
+      consent of the Author.
+
+      No Partnership or Agency. Nothing in this Licence shall be construed
+      as creating a partnership, joint venture, agency, or other
+      relationship between the Author and the Licensee.
+
+      Survival. The provisions of Sections 10, 11, 12, 13, and 14 shall
+      survive the termination or revocation of this Licence.
+
+      Rights of Third Parties. A person who is not a party to this Licence
+      shall not have any rights under the Contracts (Rights of Third
+      Parties) Ordinance (Chapter 623 of the Laws of the Hong Kong Special
+      Administrative Region) to enforce any term of this Licence.
+
+      Notices. Any notice required or permitted under this Licence shall be
+      given in writing and shall be sent to the Author at the address
+      published by the Author for the purpose of receiving such notices.
+
+   15. Versioning of this Licence.
+
+      This is Version 2.0 of the AlphaBrate Pure Experience Licence.
+
+      The Author may, from time to time, publish new versions of this
+      Licence. The terms and conditions of this Licence in force at the
+      time a Licensee obtains a copy of the Software shall govern the use
+      and Distribution of that copy of the Software by that Licensee.
+
+      A Licensee who obtains a later version of the Software may, at the
+      election of the Author, be subject to a newer version of this
+      Licence.
+
+   END OF TERMS AND CONDITIONS
