@@ -65,6 +65,70 @@ request body/header is ignored and overridden.
 { "iss": "app:{app_id}", "sub": "u_8f3a…", "exp": 1800000000, "scope": "files:rw" }
 ```
 
+The server checks these claims:
+
+- `iss` must be `app:<app_id>`
+- `sub` must be a registered user in `app_users` for that app
+- `exp` must be in the future
+- the JWT must be HS256-signed with the app's secret, not the server secret
+
+### 2.3 How to generate a user JWT
+
+The JWT is issued by the app backend using the app's own secret. This is not
+created by the FileSrv server; the server merely verifies it.
+
+The canonical JWT format is:
+
+```text
+<base64url(header)>.<base64url(payload)>.<base64url(hmac_sha256(app_secret, signing_input))>
+```
+
+Where:
+
+```json
+header = { "alg": "HS256", "typ": "JWT" }
+payload = { "iss": "app:<app_id>", "sub": "<user_id>", "exp": <unix_epoch_seconds> }
+```
+
+A minimal JavaScript example:
+
+```js
+const crypto = require('crypto');
+
+function b64url(data) {
+  return Buffer.from(data)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function generateUserJwt(appSecret, appId, userId, ttlSeconds = 3600) {
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const payload = b64url(JSON.stringify({
+    iss: `app:${appId}`,
+    sub: userId,
+    exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+  }));
+  const signingInput = `${header}.${payload}`;
+  const signature = b64url(
+    crypto.createHmac('sha256', appSecret).update(signingInput).digest()
+  );
+  return `${signingInput}.${signature}`;
+}
+
+const jwt = generateUserJwt('APP_SECRET', 1, 'u_8f3a', 3600);
+console.log(jwt);
+```
+
+Notes:
+
+- Use the app's secret, not `TENANT_FS_SERVER_SECRET`.
+- `sub` must match a user already registered to the app via `app_users`.
+- `exp` should be short-lived (for example 30 minutes to 2 hours).
+- The server verifies the JWT with `HS256` and rejects expired, tampered, or
+  unregistered users.
+
 ---
 
 ## 3. Rules and ACL (per action)
@@ -156,9 +220,9 @@ For large files or flaky networks, use the three-step session:
 
 | Step | Method & path | Behavior |
 |---|---|---|
-| 1. init | `POST /v1/upload/init` | Body `{ "total_size"?: <bytes>, "folder_id"?: <id> }`. Returns `{ "upload_id": "up_…", "status": "open", "total_size", "received_size": 0, "chunk_ttl_secs", "max_payload_bytes" }`. `total_size > 0` is rejected if it exceeds the app's `max_payload_bytes`. |
-| 2. chunk | `PUT /v1/upload/{upload_id}` | Raw chunk body, header `X-Chunk-Offset: <byte offset>`. Chunks must arrive **contiguously**: the offset must equal the server's current `received_size`. A gap → `409` with `{ "error": { "code": "conflict", "message": "Unexpected chunk offset; resume at N." } }` so the client can re-aim. App-level HMAC is verified per chunk. Returns `{ "upload_id", "received_size", "status": "open" }`. |
-| 3. finalize | `POST /v1/upload/{upload_id}/finalize` | Verifies the received byte count against `total_size`, re-checks quota atomically, SHA-256s the staged file, encrypt-writes the blob through the storage layer (see §12), and returns the same metadata shape as `POST /v1/upload`. |
+| 1. init | `POST /v1/upload/init` | Body `{ "total_size"?: <bytes>, "folder_id"?: <id> }`. Returns `{ "upload_id": "up_…", "status": "open", "total_size", "received_size": 0, "chunk_ttl_secs", "max_payload_bytes" }` |
+| 2. chunk | `PUT /v1/upload/{upload_id}` | Raw chunk body, header `X-Chunk-Offset: <byte offset>`. Chunks must arrive **contiguously**: the offset must equal the server's current `received_size` |
+| 3. finalize | `POST /v1/upload/{upload_id}/finalize` | Verifies the received byte count against `total_size`, re-checks quota atomically, SHA-256s the staged file, encrypt-writes the blob through the storage layer |
 
 - Identity rules mirror `POST /v1/upload` (user JWT, or app HMAC with
   `X-User-Id`); an unknown / expired / cross-tenant session → `404`.
@@ -481,6 +545,41 @@ curl -X POST http://<host>:8080/v1/upload \
   -H "X-Timestamp: $ts" -H "X-Nonce: $nonce" \
   -H "X-User-Id: u_8f3a" \
   --data-binary @file.bin
+```
+
+Generate a user JWT from the app secret (JS example):
+
+```js
+const crypto = require('crypto');
+
+function b64url(value) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+const appSecret = 'APP_SECRET';
+const appId = 1;
+const userId = 'u_8f3a';
+const exp = Math.floor(Date.now() / 1000) + 3600;
+const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+const payload = b64url(JSON.stringify({ iss: `app:${appId}`, sub: userId, exp }));
+const signingInput = `${header}.${payload}`;
+const signature = b64url(
+  crypto.createHmac('sha256', appSecret).update(signingInput).digest()
+);
+const jwt = `${signingInput}.${signature}`;
+console.log(jwt);
+```
+
+Then use the JWT in a request:
+
+```bash
+curl -X POST http://<host>:8080/v1/files \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json"
 ```
 
 Generate an embed link and download:
