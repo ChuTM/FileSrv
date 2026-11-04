@@ -50,13 +50,15 @@ impl ApiError {
 }
 
 impl From<rusqlite::Error> for ApiError {
-    fn from(_e: rusqlite::Error) -> Self {
+    fn from(e: rusqlite::Error) -> Self {
+        eprintln!("[filesrv] database error: {e}");
         ApiError::internal()
     }
 }
 
 impl From<tokio::io::Error> for ApiError {
-    fn from(_e: tokio::io::Error) -> Self {
+    fn from(e: tokio::io::Error) -> Self {
+        eprintln!("[filesrv] io error: {e}");
         ApiError::internal()
     }
 }
