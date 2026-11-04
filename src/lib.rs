@@ -19,9 +19,25 @@ pub use routes::{admin_router, public_router};
 pub use state::AppState;
 
 use db::Db;
+use std::path::Path;
 
 /// Open + migrate the persistent DB and build both routers.
+/// Fail at startup instead of serving every upload with an opaque 500.
+fn ensure_writable(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dir)?;
+    let probe = dir.join(format!(".write-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"ok")?;
+    std::fs::remove_file(&probe)?;
+    Ok(())
+}
+
 pub fn build_app(cfg: Config) -> Result<(axum::Router, axum::Router, Db), Box<dyn std::error::Error>> {
+    ensure_writable(&cfg.blob_root).map_err(|e| {
+        format!(
+            "blob directory {} is not writable: {e}",
+            cfg.blob_root.display()
+        )
+    })?;
     let conn = db::open_db(&cfg.db_path)?;
     db::migrate(&conn)?;
     // Sweep leftover tmp_* blobs from interrupted uploads (test report §5.3).
