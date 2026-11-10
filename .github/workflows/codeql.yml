@@ -4,11 +4,16 @@
 # master, and on a weekly schedule so newly published queries find issues in
 # code that has not changed.
 #
-# Rust is a compiled language, so CodeQL extracts it through a real build. This
-# workflow uses build-mode "manual" and compiles the crate with Cargo — the
-# documented path for Cargo projects. "autobuild" is avoided because it guesses
-# the build command and is less predictable for a crate with a bundled C
-# dependency (rusqlite's `bundled` SQLite is compiled via cc during the build).
+# BUILD MODE — `none`, and it is required, not a preference:
+# CodeQL's Rust extractor parses the source directly with its own front end and
+# does NOT support `manual` (it hard-fails with "Rust does not support the manual
+# build mode. Please try using one of the following build modes instead: none")
+# or `autobuild`. Because no build happens, there is deliberately no Cargo or
+# rust-toolchain step here: adding one would only cost minutes per run without
+# changing what is analysed. All source files (lib, src/bin/rekey.rs and the
+# integration tests) are covered by tree extraction.
+#
+# CodeQL Action v4 is used because v3 is deprecated (December 2026).
 name: CodeQL
 
 on:
@@ -36,40 +41,21 @@ jobs:
   analyze:
     name: Analyze (rust)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # CodeQL's Rust extractor expects a stable, recent stable toolchain.
-      # dtolnay/rust-toolchain is pinning-friendly and avoids relying on the
-      # runner image's preinstalled Rust.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Cache the Cargo registry and the target dir to keep scheduled scans
-      # fast. CodeQL extraction is unaffected: the build below still runs.
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Do not let a cached target/ short-circuit CodeQL extraction.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
+      # Rust requires `build-mode: none` (see the header comment); `manual` and
+      # `autobuild` are both unsupported by the Rust extractor.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: rust
-          # "manual" requires the build step below; do not switch to
-          # "autobuild" without re-checking that the crate still compiles.
-          build-mode: manual
-
-      # Build every target so CodeQL sees all source files. A plain
-      # `cargo build` would miss src/bin/rekey.rs and the integration tests.
-      - name: Build
-        run: cargo build --all-targets --locked
+          build-mode: none
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:rust"
