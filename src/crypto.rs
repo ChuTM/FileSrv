@@ -44,10 +44,6 @@ pub fn seal(server_secret: &[u8], plaintext: &[u8]) -> String {
     use aes_gcm::{Aes256Gcm, Nonce};
     let key = Sha256::digest(server_secret);
     let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte key");
-    // False positive (rust/hard-coded-cryptographic-value): this is an empty
-    // output buffer, zero-filled only to reserve length, then overwritten in
-    // full by the CSPRNG on the next line. No key material is hard-coded.
-    // codeql[rust/hard-coded-cryptographic-value]
     let mut nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce);
     let ct = cipher
@@ -194,17 +190,10 @@ pub fn blob_encrypt(server_secret: &[u8], plaintext: &[u8]) -> Vec<u8> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
 
-    // False positives (rust/hard-coded-cryptographic-value): `dek`, `dek_nonce`
-    // and `body_nonce` are zero-length-reserved buffers that are immediately
-    // filled from the CSPRNG. They are not hard-coded key material — the per-blob
-    // DEK is random by design (see the KEY-MANAGEMENT POLICY above).
-    // codeql[rust/hard-coded-cryptographic-value]
     let mut dek = [0u8; DEK_LEN];
     rand::thread_rng().fill_bytes(&mut dek);
-    // codeql[rust/hard-coded-cryptographic-value]
     let mut dek_nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut dek_nonce);
-    // codeql[rust/hard-coded-cryptographic-value]
     let mut body_nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut body_nonce);
 
@@ -275,9 +264,6 @@ pub fn blob_rekey(old_secret: &[u8], new_secret: &[u8], blob: &[u8]) -> Option<V
     if dek.len() != DEK_LEN {
         return None;
     }
-    // False positive (rust/hard-coded-cryptographic-value): empty buffer filled
-    // from the CSPRNG on the next line; no nonce value is hard-coded.
-    // codeql[rust/hard-coded-cryptographic-value]
     let mut new_dek_nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut new_dek_nonce);
     let new_wrapped = Aes256Gcm::new_from_slice(&kek(new_secret))

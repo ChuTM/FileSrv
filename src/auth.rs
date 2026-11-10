@@ -190,16 +190,10 @@ mod tests {
 
         // stale timestamp -> denied
         let stale = (now - 9999).to_string();
-        // Test fixture: the signatures, nonces and secrets below are throwaway
-        // values used only to exercise the accept/reject branches. They protect
-        // nothing and are not deployed, hence the CodeQL false-positive note.
-        // codeql[rust/hard-coded-cryptographic-value]
         let sig2 = crypto::app_signature(secret, &crypto::app_canonical("POST", "/v1/upload", "", "hash", &stale, "n2"));
-        // codeql[rust/hard-coded-cryptographic-value]
         assert!(verify_app_signature(&db, b"server-secret", "app_key_1", &sig2, &stale, "n2", &sp("POST", "/v1/upload", "", "hash", "1.1.1.1")).is_err());
 
         // wrong signature -> denied
-        // codeql[rust/hard-coded-cryptographic-value]
         assert!(verify_app_signature(&db, b"server-secret", "app_key_1", "deadbeef", &now.to_string(), "n3", &sp("POST", "/v1/upload", "", "hash", "1.1.1.1")).is_err());
     }
 
