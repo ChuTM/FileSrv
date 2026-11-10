@@ -17,14 +17,14 @@ pub async fn download(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
         return Err(ApiError::bad_request("Token is required."));
     }
     let ip = client_ip(&st, &req);
-    let (file, path, app_id) = resolve_download(&st, &token, &ip).await?;
-    // F7 fix: downloads count against the tenant's rate-limit budget like
-    // every other public endpoint, so a hot link cannot exhaust server I/O
-    // with unbounded token traffic. (Invalid-token requests are already
-    // rejected before any work beyond a single cheap DB row lookup.)
+    // M1: cheap capability/metadata check first, then the per-app rate-limit
+    // gate, and only then the expensive blob locate + decrypt. The tenant
+    // budget is charged before any I/O is spent on behalf of a hot token.
+    let (file, app_id) = resolve_download_meta(&st, &token, &ip)?;
     if let Err(resp) = ratelimit::gate(&st, app_id) {
         return Ok(*resp);
     }
+    let path = resolve_download_path(&st.cfg, &file, app_id)?;
     // Opt-in per-download audit trail (TENANT_FS_AUDIT_DOWNLOADS=true). Off by
     // default to avoid audit volume on high-read workloads; the maintenance
     // loop still prunes old rows per TENANT_FS_AUDIT_RETENTION_DAYS.
@@ -57,7 +57,9 @@ pub async fn download_head(AxState(st): AxState<AppState>, req: Request<Body>) -
         return Err(ApiError::bad_request("Token is required."));
     }
     let ip = client_ip(&st, &req);
-    let (file, _path, app_id) = resolve_download(&st, &token, &ip).await?;
+    // M1: same ordering as GET — cheap meta, gate, then (HEAD does not need the
+    // blob at all, but the gate must still precede any resolution work).
+    let (file, app_id) = resolve_download_meta(&st, &token, &ip)?;
     if let Err(resp) = ratelimit::gate(&st, app_id) {
         return Ok(*resp);
     }
@@ -105,14 +107,16 @@ fn client_ip(st: &AppState, req: &Request<Body>) -> String {
     }
 }
 
-/// Shared capability + file resolution for GET and HEAD.
-/// Returns the resolved file, its blob path, and the tenant (app) id so the
-/// caller can apply the per-app rate-limit gate.
-async fn resolve_download(
+/// Shared capability + metadata resolution for GET and HEAD (the CHEAP part):
+/// validates the token (+ IP binding) and loads the file/app rows, but does NOT
+/// touch the blob on disk. The caller applies the per-app rate-limit gate after
+/// this and before `resolve_blob_path`, so a hot token cannot spend server I/O
+/// (disk read + envelope decrypt) before the tenant budget is checked (M1).
+fn resolve_download_meta(
     st: &AppState,
     token: &str,
     ip: &str,
-) -> Result<(db::FileRow, std::path::PathBuf, i64), ApiError> {
+) -> Result<(db::FileRow, i64), ApiError> {
     // Capability check: valid, unexpired, unrevoked token (+ IP binding).
     let grant = tokens::verify(&st.db, token, ip)
         .ok_or_else(|| ApiError::not_found("Token not found or expired."))?;
@@ -124,9 +128,19 @@ async fn resolve_download(
     if !app.map(|a| a.enabled && a.deleted_at.is_none()).unwrap_or(false) {
         return Err(ApiError::not_found("File not found."));
     }
-    let p = storage::resolve_blob(&st.cfg, grant.app_id, &file.storage_uuid, file.blob_path.as_deref())
-        .map_err(|_| ApiError::not_found("File content missing."))?;
-    Ok((file, p, grant.app_id))
+    Ok((file, grant.app_id))
+}
+
+/// The EXPENSIVE half of resolution: locate/canonicalize the blob and, for an
+/// encrypted blob, decrypt it into the dec_cache materialization. Must only run
+/// after the rate-limit gate has admitted the request (M1).
+fn resolve_download_path(
+    cfg: &crate::config::Config,
+    file: &db::FileRow,
+    app_id: i64,
+) -> Result<std::path::PathBuf, ApiError> {
+    storage::resolve_blob(cfg, app_id, &file.storage_uuid, file.blob_path.as_deref())
+        .map_err(|_| ApiError::not_found("File content missing."))
 }
 
 /// Content-Disposition filename: prefer the stored original name (sanitized at

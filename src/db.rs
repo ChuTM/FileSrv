@@ -171,6 +171,20 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch("ALTER TABLE files ADD COLUMN name TEXT;")?;
         }
     }
+    // H1: per-user revocation for user-context JWTs. A JWT is otherwise valid
+    // until exp; setting this column makes every JWT for that (app_id,user_id)
+    // fail verification immediately. NULL = not revoked (the default, so
+    // existing behaviour is unchanged). No API surface depends on it; it is an
+    // operational switch for token-compromise / offboarding.
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(app_users)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !cols.iter().any(|c| c == "revoked_at") {
+            conn.execute_batch("ALTER TABLE app_users ADD COLUMN revoked_at INTEGER;")?;
+        }
+    }
     Ok(())
 }
 
@@ -414,11 +428,19 @@ pub struct AuditEntry<'a> {
 }
 
 pub fn audit(conn: &Connection, entry: &AuditEntry, at: i64) {
-    conn.execute(
+    // M5: never swallow an audit write failure silently. A missing audit row is
+    // a compliance gap, so surface it on stderr with the entry context; the
+    // request itself still succeeds (audit is not allowed to break request
+    // handling), but operators can see the failure in logs and alert on it.
+    if let Err(e) = conn.execute(
         "INSERT INTO audit_log(actor,action,app_id,target,ip,decision,at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![entry.actor, entry.action, entry.app_id, entry.target, entry.ip, entry.decision, at],
-    )
-    .ok();
+    ) {
+        eprintln!(
+            "[filesrv] AUDIT WRITE FAILED: {e} (actor={}, action={}, app_id={:?}, target={}, decision={})",
+            entry.actor, entry.action, entry.app_id, entry.target, entry.decision
+        );
+    }
 }
 
 /// Serialize all DB writes through a single connection (single-writer).

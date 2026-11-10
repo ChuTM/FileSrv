@@ -1,6 +1,7 @@
 target/
 data/
 development/
+.logs/
 
 .DS_Store
 .env

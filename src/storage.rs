@@ -153,6 +153,19 @@ pub fn remove_blob(cfg: &Config, app_id: i64, uuid: &str, rel_path: Option<&str>
     }
 }
 
+/// M2 fix: remove the per-uuid plaintext materializations for a list of storage
+/// uuids from `blob_root/dec_cache`. `dec_cache` is keyed by uuid (not app_id),
+/// so callers that delete an app's blob tree by directory (wipe/purge) must
+/// also drop these entries, or decrypted plaintext lingers until the mtime TTL
+/// sweep. Collection is done by the caller BEFORE the rows are deleted.
+pub fn remove_dec_cache_entries(cfg: &Config, uuids: &[String]) {
+    for uuid in uuids {
+        if let Ok(cache) = dec_cache_path(cfg, uuid) {
+            std::fs::remove_file(cache).ok();
+        }
+    }
+}
+
 /// One-time migration for pre-encryption deployments: rewrite every on-disk
 /// blob that is still plaintext into the envelope format in place.
 ///

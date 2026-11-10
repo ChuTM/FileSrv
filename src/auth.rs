@@ -105,14 +105,21 @@ pub fn verify_user_jwt(db: &Db, server_secret: &[u8], token: &str) -> Result<Ide
     }
     // user must exist inside the app (UNIQUE(app_id,user_id)); register is only
     // allowed through app-level identity, so an unknown user here is denied.
-    let exists: bool = conn
+    // H1: an explicitly revoked user (revoked_at set by an operator) is denied
+    // immediately, before the JWT's own exp — this is the only way to kill a
+    // leaked offboarding token early. NULL revoked_at = normal (unchanged).
+    let (exists, revoked): (bool, bool) = conn
         .query_row(
-            "SELECT COUNT(*) FROM app_users WHERE app_id=?1 AND user_id=?2",
+            "SELECT COUNT(*), COALESCE(MAX(revoked_at), 0) FROM app_users WHERE app_id=?1 AND user_id=?2",
             params![app_id, claims.sub],
-            |r| r.get::<_, i64>(0).map(|c| c > 0),
+            |r| {
+                let n = r.get::<_, i64>(0)?;
+                let r_at = r.get::<_, i64>(1)?;
+                Ok((n > 0, r_at != 0))
+            },
         )
         .map_err(|_| AuthError::Invalid)?;
-    if !exists {
+    if !exists || revoked {
         return Err(AuthError::Invalid);
     }
     Ok(Identity::User {

@@ -190,48 +190,36 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
         }
     };
 
-    // Stream body to a temp file, enforcing max payload incrementally.
-    let uuid = crypto::new_uuid();
-    let tmp_path = st.cfg.blob_root.join(format!("tmp_{uuid}"));
-    if let Some(parent) = tmp_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    // RAII: the temp file is removed on ANY error path (including client
-    // disconnect mid-stream), and only kept once committed below.
-    let mut guard = TempBlobGuard(tmp_path.clone(), false);
+    // M4: for App-signed requests the body hash must be known BEFORE the bytes
+    // reach disk — otherwise a forged/dead signature still burns a full temp-file
+    // write. Such requests are buffered in memory (bounded by max_payload, which
+    // the app already declares) and verified here, before any file is created.
+    // JWT-authenticated requests have no body HMAC and keep streaming to disk.
     let body = req.into_body();
-    let mut stream = http_body_util::BodyStream::new(body);
-    let mut file = tokio::fs::File::create(&tmp_path).await?;
-    let mut hasher = Sha256::new();
-    let mut size: u64 = 0;
-    while let Some(frame) = stream.next().await {
-        let frame = frame.map_err(|_| ApiError::internal())?;
-        if let Some(data) = frame.data_ref() {
-            size += data.len() as u64;
-            if size > max_payload as u64 {
-                return Err(ApiError::too_large(format!(
+    let mut body = Some(body);
+    let app_signed = matches!(&identity, Identity::App(_));
+    let mut buffered: Option<Vec<u8>> = None;
+    if app_signed {
+        let b = body.take().expect("body consumed once");
+        let bytes = axum::body::to_bytes(b, max_payload as usize)
+            .await
+            .map_err(|_| {
+                ApiError::too_large(format!(
                     "Payload exceeds app limit of {max_payload} bytes."
-                )));
-            }
-            hasher.update(data);
-            file.write_all(data).await?;
-        }
-    }
-    file.flush().await?;
-    drop(file);
-    let body_hash = hex::encode(hasher.finalize());
-
-    // Verify app HMAC now that body hash is known (JWT path skips this).
-    if let Identity::App(_) = &identity {
+                ))
+            })?
+            .to_vec();
+        let body_hash = sha256(&bytes);
         let ctx = ReqCtx {
-            method,
-            path,
-            query,
-            headers,
-            body_hash: body_hash.clone(),
+            method: method.clone(),
+            path: path.clone(),
+            query: query.clone(),
+            headers: headers.clone(),
+            body_hash,
             peer_ip: peer.clone(),
             trust_xff: st.cfg.trust_xff,
         };
+        // Verified before a single byte is written to disk (M4).
         extract_identity(&st, &ctx)
             .map_err(|_| ApiError::unauthorized("Invalid app signature."))?
             .app_id()
@@ -242,7 +230,45 @@ pub async fn upload(AxState(st): AxState<AppState>, req: Request<Body>) -> ApiRe
                     Err(ApiError::unauthorized("Invalid app signature."))
                 }
             })?;
+        buffered = Some(bytes);
     }
+
+    // Stream body to a temp file, enforcing max payload incrementally.
+    let uuid = crypto::new_uuid();
+    let tmp_path = st.cfg.blob_root.join(format!("tmp_{uuid}"));
+    if let Some(parent) = tmp_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    // RAII: the temp file is removed on ANY error path (including client
+    // disconnect mid-stream), and only kept once committed below.
+    let mut guard = TempBlobGuard(tmp_path.clone(), false);
+    let mut file = tokio::fs::File::create(&tmp_path).await?;
+    let mut hasher = Sha256::new();
+    let mut size: u64 = 0;
+    if let Some(bytes) = buffered {
+        size = bytes.len() as u64;
+        hasher.update(&bytes);
+        file.write_all(&bytes).await?;
+    } else {
+        let body = body.take().expect("body consumed once");
+        let mut stream = http_body_util::BodyStream::new(body);
+        while let Some(frame) = stream.next().await {
+            let frame = frame.map_err(|_| ApiError::internal())?;
+            if let Some(data) = frame.data_ref() {
+                size += data.len() as u64;
+                if size > max_payload as u64 {
+                    return Err(ApiError::too_large(format!(
+                        "Payload exceeds app limit of {max_payload} bytes."
+                    )));
+                }
+                hasher.update(data);
+                file.write_all(data).await?;
+            }
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    let body_hash = hex::encode(hasher.finalize());
 
     // Per-app rate-limit gate (generate/upload/export share one bucket, §11).
     if let Err(resp) = ratelimit::gate(&st, app_id) {
@@ -543,6 +569,38 @@ pub async fn upload_chunk(AxState(st): AxState<AppState>, req: Request<Body>) ->
         (job.received_size, job.total_size, job.path)
     };
 
+    // M4: App-signed chunks are buffered (bounded by the app's max payload) and
+    // HMAC-verified BEFORE the staged file is opened/written; a forged signature
+    // can no longer burn a disk write. JWT chunks keep streaming to disk.
+    let mut body = Some(req.into_body());
+    let mut buffered: Option<Vec<u8>> = None;
+    if matches!(&identity, Identity::App(_)) {
+        let b = body.take().expect("body consumed once");
+        let bytes = axum::body::to_bytes(b, app.max_payload_bytes as usize)
+            .await
+            .map_err(|_| {
+                ApiError::too_large(format!(
+                    "Payload exceeds app limit of {} bytes.",
+                    app.max_payload_bytes
+                ))
+            })?
+            .to_vec();
+        // The projected size check is applied below on the real write; here we
+        // only need the hash to authenticate the request before touching disk.
+        let ctx = ReqCtx {
+            method: method.clone(),
+            path: path.clone(),
+            query: query.clone(),
+            headers: headers.clone(),
+            body_hash: sha256(&bytes),
+            peer_ip: peer.clone(),
+            trust_xff: st.cfg.trust_xff,
+        };
+        extract_identity(&st, &ctx)
+            .map_err(|_| ApiError::unauthorized("Invalid app signature."))?;
+        buffered = Some(bytes);
+    }
+
     // Stream the chunk into the staged file at the given offset.
     let staged = std::path::PathBuf::from(&job_path);
     if let Some(parent) = staged.parent() {
@@ -560,47 +618,53 @@ pub async fn upload_chunk(AxState(st): AxState<AppState>, req: Request<Body>) ->
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let mut hasher = Sha256::new();
     let mut size: u64 = 0;
-    let mut stream = http_body_util::BodyStream::new(req.into_body());
-    while let Some(frame) = stream.next().await {
-        let frame = frame.map_err(|_| ApiError::internal())?;
-        if let Some(data) = frame.data_ref() {
-            size += data.len() as u64;
-            let projected = job_received as u64 + size;
-            if projected > app.max_payload_bytes as u64 {
-                return Err(ApiError::too_large(format!(
-                    "Payload exceeds app limit of {} bytes.",
-                    app.max_payload_bytes
-                )));
+    if let Some(data) = buffered {
+        size = data.len() as u64;
+        let projected = job_received as u64 + size;
+        if projected > app.max_payload_bytes as u64 {
+            return Err(ApiError::too_large(format!(
+                "Payload exceeds app limit of {} bytes.",
+                app.max_payload_bytes
+            )));
+        }
+        if let Some(ts) = job_total {
+            if projected > ts as u64 {
+                return Err(ApiError::too_large(
+                    "Chunk exceeds the declared total size.",
+                ));
             }
-            if let Some(ts) = job_total {
-                if projected > ts as u64 {
-                    return Err(ApiError::too_large(
-                        "Chunk exceeds the declared total size.",
-                    ));
+        }
+        hasher.update(&data);
+        file.write_all(&data).await?;
+    } else {
+        let body = body.take().expect("body consumed once");
+        let mut stream = http_body_util::BodyStream::new(body);
+        while let Some(frame) = stream.next().await {
+            let frame = frame.map_err(|_| ApiError::internal())?;
+            if let Some(data) = frame.data_ref() {
+                size += data.len() as u64;
+                let projected = job_received as u64 + size;
+                if projected > app.max_payload_bytes as u64 {
+                    return Err(ApiError::too_large(format!(
+                        "Payload exceeds app limit of {} bytes.",
+                        app.max_payload_bytes
+                    )));
                 }
+                if let Some(ts) = job_total {
+                    if projected > ts as u64 {
+                        return Err(ApiError::too_large(
+                            "Chunk exceeds the declared total size.",
+                        ));
+                    }
+                }
+                hasher.update(data);
+                file.write_all(data).await?;
             }
-            hasher.update(data);
-            file.write_all(data).await?;
         }
     }
     file.flush().await?;
     drop(file);
-    let body_hash = hex::encode(hasher.finalize());
-
-    // App HMAC verified now that the chunk body hash is known.
-    if let Identity::App(_) = &identity {
-        let ctx = ReqCtx {
-            method,
-            path,
-            query,
-            headers,
-            body_hash,
-            peer_ip: peer.clone(),
-            trust_xff: st.cfg.trust_xff,
-        };
-        extract_identity(&st, &ctx)
-            .map_err(|_| ApiError::unauthorized("Invalid app signature."))?;
-    }
+    let _body_hash = hex::encode(hasher.finalize());
     if let Err(resp) = ratelimit::gate(&st, app_id) {
         return Ok(*resp);
     }

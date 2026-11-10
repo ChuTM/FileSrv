@@ -64,12 +64,30 @@ async fn main() {
     }
     let (public, admin, db_handle) = build_app(cfg.clone()).expect("failed to initialize server");
 
+    // L3: legacy plaintext blobs written before at-rest encryption was enabled
+    // stay plaintext forever unless rewritten. When encryption is on, run the
+    // (idempotent) one-shot re-encryption at startup and report the count; this
+    // never deletes data and re-runs cheaply (already-encrypted blobs skipped).
+    if cfg.encrypt_blobs {
+        match filesrv::storage::migrate_plaintext_blobs(&cfg) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[filesrv] re-encrypted {n} legacy plaintext blob(s) at startup"),
+            Err(e) => eprintln!("[filesrv] WARNING: legacy blob re-encryption failed: {e}"),
+        }
+    }
+
     let public_listener = tokio::net::TcpListener::bind(&cfg.public_bind)
         .await
         .unwrap_or_else(|e| panic!("public bind {} failed: {e}", cfg.public_bind));
     let admin_listener = tokio::net::TcpListener::bind(&cfg.admin_bind)
         .await
         .unwrap_or_else(|e| panic!("admin bind {} failed: {e}", cfg.admin_bind));
+    // M6: bound concurrent request handling so a slow/scripted client cannot
+    // hold unbounded server resources. Requests beyond the cap wait for a slot
+    // (no API/route change); this protects memory/threads from connection
+    // exhaustion. Hyper still applies header-read limits per connection.
+    let public = public.layer(tower::limit::GlobalConcurrencyLimitLayer::new(512));
+    let admin = admin.layer(tower::limit::GlobalConcurrencyLimitLayer::new(64));
 
     println!("filesrv public  -> http://{}", cfg.public_bind);
     println!("filesrv admin   -> http://{} (localhost only)", cfg.admin_bind);

@@ -255,10 +255,20 @@ pub async fn export_download(AxState(st): AxState<AppState>, req: Request<Body>)
     if status != "ready" {
         return Err(ApiError::conflict("Export job is not ready."));
     }
-    let p = std::path::PathBuf::from(&path);
-    if !p.starts_with(st.cfg.blob_root.join("exports")) {
+    // M3 fix: a prefix check on a non-canonicalized path does not stop a
+    // symlink pointing outside the exports root. Resolve both the exports root
+    // and the artifact with canonicalize() and compare the resolved paths.
+    let exports_root = st.cfg.blob_root.join("exports");
+    let root_canon = exports_root
+        .canonicalize()
+        .map_err(|_| ApiError::forbidden("Invalid export path."))?;
+    let p_canon = std::path::PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|_| ApiError::not_found("Export artifact not found."))?;
+    if !p_canon.starts_with(&root_canon) {
         return Err(ApiError::forbidden("Invalid export path."));
     }
+    let p = p_canon;
     let f = tokio::fs::File::open(&p).await?;
     let stream = tokio_util::io::ReaderStream::new(f);
     let body = Body::from_stream(stream);

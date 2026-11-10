@@ -59,6 +59,15 @@ async fn query_ctx(st: &AppState, req: Request<Body>) -> Result<ReqCtx, ApiError
     })
 }
 
+/// Storage uuids of every file row (live or tombstoned) belonging to an app.
+/// M2: used by wipe/purge to drop the uuid-keyed dec_cache plaintext entries
+/// before the rows are deleted.
+fn storage_uuids_for_app(conn: &rusqlite::Connection, app_id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT storage_uuid FROM files WHERE app_id=?1")?;
+    let rows = stmt.query_map(params![app_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
 fn app_json(a: &db::AppRow) -> Value {
     json!({
         "app_id": a.id,
@@ -291,6 +300,10 @@ pub async fn wipe_app(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
     let conn = st.db.lock().unwrap();
     db::app_by_id(&conn, id)?
         .ok_or_else(|| ApiError::not_found("App not found."))?;
+    // M2 fix: collect the storage uuids BEFORE the rows are gone, so the
+    // plaintext dec_cache entries (keyed by uuid, outside app_{id}) can be
+    // removed together with the encrypted blob tree below.
+    let uuids = storage_uuids_for_app(&conn, id)?;
     conn.execute("DELETE FROM files WHERE app_id=?1", params![id])?;
     conn.execute("DELETE FROM folders WHERE app_id=?1", params![id])?;
     conn.execute("DELETE FROM tokens WHERE app_id=?1", params![id])?;
@@ -302,6 +315,7 @@ pub async fn wipe_app(AxState(st): AxState<AppState>, req: Request<Body>) -> Api
         std::fs::remove_dir_all(&blob_dir)
             .map_err(|_| ApiError::bad_request("App record removed but failed to delete blob dir on disk."))?;
     }
+    crate::storage::remove_dec_cache_entries(&st.cfg, &uuids);
     db::audit(&conn, &db::AuditEntry { actor: "admin", action: "app.wipe", app_id: Some(id), target: "", ip: &ctx.client_ip(), decision: "allow" }, Config::now());
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -346,6 +360,9 @@ pub async fn purge_app(AxState(st): AxState<AppState>, req: Request<Body>) -> Ap
     db::app_by_id(&conn, id)?
         .ok_or_else(|| ApiError::not_found("App not found."))?;
 
+    // M2 fix: capture the uuids before the rows vanish so dec_cache plaintext
+    // entries can be unlinked with the encrypted blob tree.
+    let uuids = storage_uuids_for_app(&conn, id)?;
     // children metadata (no FK cascade is relied on; delete explicitly)
     conn.execute("DELETE FROM files WHERE app_id=?1", params![id])?;
     conn.execute("DELETE FROM folders WHERE app_id=?1", params![id])?;
@@ -360,6 +377,7 @@ pub async fn purge_app(AxState(st): AxState<AppState>, req: Request<Body>) -> Ap
         std::fs::remove_dir_all(&blob_dir)
             .map_err(|_| ApiError::bad_request("App record removed but failed to delete blob dir on disk."))?;
     }
+    crate::storage::remove_dec_cache_entries(&st.cfg, &uuids);
 
     db::audit(&conn, &db::AuditEntry { actor: "admin", action: "app.purge", app_id: Some(id), target: "", ip: &ctx.client_ip(), decision: "allow" }, Config::now());
     Ok(StatusCode::NO_CONTENT.into_response())
