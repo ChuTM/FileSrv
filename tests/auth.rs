@@ -35,9 +35,13 @@ async fn replay_tamper_stale_denied() {
 
     // first use with nonce N1 -> ok
     let ts = Config::now().to_string();
+    // Test fixture: "rp-N" nonces and the literal timestamp are throwaway values
+    // for the accept/reject branches only; nothing here is a deployed secret.
+    // codeql[rust/hard-coded-cryptographic-value]
     let (s, _) = send(&ctx.public, make("rp-1", mk_sig(&ts, "rp-1"), ts.clone())).await;
     assert_eq!(s, StatusCode::OK);
     // replay same nonce -> 401
+    // codeql[rust/hard-coded-cryptographic-value]
     let (s, v) = json_of(send(&ctx.public, make("rp-1", mk_sig(&ts, "rp-1"), ts.clone())).await).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
     // tampered signature (fresh nonce, bad sig) -> 401
@@ -45,6 +49,7 @@ async fn replay_tamper_stale_denied() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     // stale timestamp -> 401
     let stale = (Config::now() - 10_000).to_string();
+    // codeql[rust/hard-coded-cryptographic-value]
     let (s, _) = send(&ctx.public, make("rp-3", mk_sig(&stale, "rp-3"), stale)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

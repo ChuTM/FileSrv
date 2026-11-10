@@ -429,16 +429,23 @@ pub struct AuditEntry<'a> {
 
 pub fn audit(conn: &Connection, entry: &AuditEntry, at: i64) {
     // M5: never swallow an audit write failure silently. A missing audit row is
-    // a compliance gap, so surface it on stderr with the entry context; the
-    // request itself still succeeds (audit is not allowed to break request
-    // handling), but operators can see the failure in logs and alert on it.
+    // a compliance gap, so surface it on stderr; the request itself still
+    // succeeds (audit is not allowed to break request handling), but operators
+    // can see the failure in logs and alert on it.
+    //
+    // The log line deliberately omits `target` and `ip`: `target` can carry a
+    // capability token (see routes::tokens::revoke_token) and other
+    // caller-supplied identifiers, and stderr is often shipped to a less
+    // protected log sink than the DB. Emitting them here would turn a failed
+    // audit write into a credential leak. action/app_id/decision are non-secret
+    // and are enough to triage; the row itself is recovered from the DB.
     if let Err(e) = conn.execute(
         "INSERT INTO audit_log(actor,action,app_id,target,ip,decision,at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![entry.actor, entry.action, entry.app_id, entry.target, entry.ip, entry.decision, at],
     ) {
         eprintln!(
-            "[filesrv] AUDIT WRITE FAILED: {e} (actor={}, action={}, app_id={:?}, target={}, decision={})",
-            entry.actor, entry.action, entry.app_id, entry.target, entry.decision
+            "[filesrv] AUDIT WRITE FAILED: {e} (action={}, app_id={:?}, decision={})",
+            entry.action, entry.app_id, entry.decision
         );
     }
 }
